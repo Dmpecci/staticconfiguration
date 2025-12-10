@@ -1,0 +1,16 @@
+[project]
+name = "staticconfig"
+version = "0.1.0"
+description = "Herramienta para crear configuraciones globales, instancias estáticas"
+authors = [
+    {name = "David Muñoz Pecci"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

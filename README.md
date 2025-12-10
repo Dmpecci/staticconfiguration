@@ -1,1 +1,1 @@
-# offmem
+# staticconfig
