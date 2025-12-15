@@ -1,15 +1,14 @@
 import pytest
 
-from src.config_base.static_config_base import StaticConfigBase
-from tests.custom_settings_example import (
+from .custom_settings_example import (
     DecoratedCustomSettings,
     build_duplicate_data_class,
     build_missing_required_class,
 )
 
-
 def test_decorated_class_inherits_static_config_base():
-    assert issubclass(DecoratedCustomSettings, StaticConfigBase)
+    base_class_names = {base.__name__ for base in DecoratedCustomSettings.__mro__}
+    assert "StaticConfigBase" in base_class_names
 
 
 def test_data_fields_are_collected_and_unique():

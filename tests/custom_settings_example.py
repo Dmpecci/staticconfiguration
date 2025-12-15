@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from src.config_base.decorator import staticconfig
-from src.entities.data import Data
-
+from staticconfiguration import staticconfig, Data
 
 @staticconfig
 class DecoratedCustomSettings:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict
 
-from src.entities.data import Data
+from ..entities import Data
 from .static_config_base import StaticConfigBase
 from .static_config_interface import StaticConfigInterface
 
@@ -26,7 +26,6 @@ def _verify_data_fields(cls: type) -> None:
 
     if data_fields:
         cls.__data_fields__ = data_fields
-
 
 def _inject_config_base_inheritance(cls: type) -> type:
     if issubclass(cls, StaticConfigBase):

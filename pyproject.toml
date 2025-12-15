@@ -1,5 +1,5 @@
 [project]
-name = "staticconfig"
+name = "staticconfiguration"
 version = "0.1.0"
 description = "Herramienta para crear configuraciones globales, instancias estáticas"
 authors = [
@@ -8,7 +8,7 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "pytest (>=9.0.2,<10.0.0)"
+    "pytest (>=9.0.2,<10.0.0)",
 ]
 
 
