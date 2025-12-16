@@ -624,9 +624,9 @@ class TestStaticConfigBaseGet:
         
         try:
             # Initialize and set a value
-            TestConfig.set("max_retries", 5)
+            TestConfig.set(TestConfig.max_retries, 5)
             
-            result = TestConfig.get("max_retries")
+            result = TestConfig.get(TestConfig.max_retries)
             assert result == 5
         finally:
             remove_json(config_path)
@@ -637,7 +637,7 @@ class TestStaticConfigBaseGet:
         config_path = temp_config_dir / TestConfig.__config_file__
         
         try:
-            result = TestConfig.get("timeout")
+            result = TestConfig.get(TestConfig.timeout)
             assert result == 30  # Default value
         finally:
             remove_json(config_path)
@@ -649,7 +649,7 @@ class TestStaticConfigBaseGet:
         
         try:
             with pytest.raises(KeyError) as exc_info:
-                TestConfig.get("nonexistent_field")
+                TestConfig.get(Data(name="nonexistent_field", data_type=str, default=""))
             
             assert "nonexistent_field" in str(exc_info.value)
         finally:
@@ -663,7 +663,7 @@ class TestStaticConfigBaseGet:
         try:
             assert not config_path.exists()
             
-            TestConfig.get("api_url")
+            TestConfig.get(TestConfig.api_url)
             
             assert config_path.exists()
         finally:
@@ -676,7 +676,7 @@ class TestStaticConfigBaseGet:
         config_path = temp_config_dir / TestConfig.__config_file__
         
         try:
-            result = TestConfig.get("api_url")
+            result = TestConfig.get(TestConfig.api_url)
             assert result == "https://api.example.com"
             assert config_path.exists()
         finally:
@@ -696,9 +696,9 @@ class TestStaticConfigBaseSet:
         config_path = temp_config_dir / TestConfig.__config_file__
         
         try:
-            TestConfig.set("max_retries", 10)
+            TestConfig.set(TestConfig.max_retries, 10)
             
-            result = TestConfig.get("max_retries")
+            result = TestConfig.get(TestConfig.max_retries)
             assert result == 10
         finally:
             remove_json(config_path)
@@ -710,7 +710,7 @@ class TestStaticConfigBaseSet:
         
         try:
             with pytest.raises(KeyError) as exc_info:
-                TestConfig.set("nonexistent_field", "value")
+                TestConfig.set(Data(name="nonexistent_field", data_type=str, default=""), "value")
             
             assert "nonexistent_field" in str(exc_info.value)
         finally:
@@ -723,7 +723,7 @@ class TestStaticConfigBaseSet:
         
         try:
             with pytest.raises(TypeError) as exc_info:
-                TestConfig.set("max_retries", "not_an_int")
+                TestConfig.set(TestConfig.max_retries, "not_an_int")
             
             assert "max_retries" in str(exc_info.value)
             assert "int" in str(exc_info.value)
@@ -738,7 +738,7 @@ class TestStaticConfigBaseSet:
         try:
             assert not config_path.exists()
             
-            TestConfig.set("timeout", 60)
+            TestConfig.set(TestConfig.timeout, 60)
             
             assert config_path.exists()
         finally:
@@ -750,15 +750,15 @@ class TestStaticConfigBaseSet:
         config_path = temp_config_dir / TestConfig.__config_file__
         
         try:
-            TestConfig.set("max_retries", 5)
-            TestConfig.set("timeout", 60)
+            TestConfig.set(TestConfig.max_retries, 5)
+            TestConfig.set(TestConfig.timeout, 60)
             
             # Set one field and verify others are unchanged
-            TestConfig.set("api_url", "https://new-api.example.com")
+            TestConfig.set(TestConfig.api_url, "https://new-api.example.com")
             
-            assert TestConfig.get("api_url") == "https://new-api.example.com"
-            assert TestConfig.get("max_retries") == 5
-            assert TestConfig.get("timeout") == 60
+            assert TestConfig.get(TestConfig.api_url) == "https://new-api.example.com"
+            assert TestConfig.get(TestConfig.max_retries) == 5
+            assert TestConfig.get(TestConfig.timeout) == 60
         finally:
             remove_json(config_path)
 
@@ -1000,11 +1000,11 @@ class TestPersistenceEdgeCases:
             field_b = Data(name="field_b", data_type=str, default="b")
         
         try:
-            ConfigA.set("field_a", "value_a")
-            ConfigB.set("field_b", "value_b")
+            ConfigA.set(ConfigA.field_a, "value_a")
+            ConfigB.set(ConfigB.field_b, "value_b")
             
-            assert ConfigA.get("field_a") == "value_a"
-            assert ConfigB.get("field_b") == "value_b"
+            assert ConfigA.get(ConfigA.field_a) == "value_a"
+            assert ConfigB.get(ConfigB.field_b) == "value_b"
         finally:
             remove_json(temp_config_dir / "config_a.json")
             remove_json(temp_config_dir / "config_b.json")

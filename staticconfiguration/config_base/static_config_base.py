@@ -41,42 +41,40 @@ class StaticConfigBase(StaticConfigInterface):
             - set validates the type and persists the new value using JSONBackend.
     """
     @classmethod
-    def get(cls, data_name: str):
+    def get(cls, data_field: Data):
         """
-        Retrieve the configuration value associated with data_name.
+        Retrieve the configuration value associated with ``data_field``.
 
         Responsibility:
-            - Locate the Data descriptor corresponding to the given name,
+            - Locate the Data descriptor corresponding to the provided field,
               ensure the configuration file exists, and invoke the backend
               to obtain the stored value.
 
         Contracts:
             Preconditions:
-                - ``data_name`` must correspond to a Data attribute in the
-                  subclass (case-sensitive).
+                - ``data_field`` must be a Data descriptor attribute in the
+                  subclass.
             Postconditions:
                 - Returns the currently persisted value or the default value
                   defined in the Data if it does not yet exist in the file.
 
         Args:
-            data_name (str): Name of the data field to retrieve.
+            data_field (Data): Data descriptor attribute to retrieve.
 
         Returns:
             Any: Field value decoded according to Data rules.
 
         Raises:
-            KeyError: If ``data_name`` is not defined in the class.
+            TypeError: If ``data_field`` is not a Data descriptor.
+            KeyError: If ``data_field`` is not defined in the class.
 
         Example:
-            >>> MyConfig.get('timeout')
+            >>> MyConfig.get(MyConfig.timeout)
             30
         """
         data_fields = cls._get_data_fields()
 
-        if data_name not in data_fields:
-            raise KeyError(f"Data field {data_name!r} is not defined.")
-
-        data = data_fields[data_name]
+        data = cls._resolve_data_field(data_field, data_fields)
         config_path = Path(cls.__config_path__).expanduser() / cls.__config_file__
 
         backend = JSONBackend()
@@ -85,7 +83,7 @@ class StaticConfigBase(StaticConfigInterface):
         return backend.read_value(data, config_path)
     
     @classmethod
-    def set(cls, data_name: str, new_value: object):
+    def set(cls, data_field: Data, new_value: object):
         """
         Assign and persist a new value for the specified field.
 
@@ -96,14 +94,14 @@ class StaticConfigBase(StaticConfigInterface):
 
         Contracts:
             Preconditions:
-                - ``data_name`` corresponds to a Data defined in the class.
+                - ``data_field`` corresponds to a Data defined in the class.
                 - ``new_value`` is an instance compatible with ``data.data_type``.
             Postconditions:
                 - The new value is persisted in the configuration file and
                   ``last_modified`` is updated.
 
         Args:
-            data_name (str): Name of the field to modify.
+            data_field (Data): Data descriptor attribute to modify.
             new_value (object): New value that must be compatible with the type
                 declared in the corresponding Data.
 
@@ -111,21 +109,19 @@ class StaticConfigBase(StaticConfigInterface):
             None: Persists the new value to disk.
 
         Raises:
-            KeyError: If ``data_name`` is not defined in the class.
-            TypeError: If ``new_value`` is not of the expected type.
+            TypeError: If ``data_field`` is not a Data descriptor or
+                ``new_value`` is not of the expected type.
+            KeyError: If ``data_field`` is not defined in the class.
 
         Example:
-            >>> MyConfig.set('timeout', 60)
+            >>> MyConfig.set(MyConfig.timeout, 60)
         """
         data_fields = cls._get_data_fields()
 
-        if data_name not in data_fields:
-            raise KeyError(f"Data field {data_name!r} is not defined.")
-
-        data = data_fields[data_name]
+        data = cls._resolve_data_field(data_field, data_fields)
 
         if not isinstance(new_value, data.data_type):
-            raise TypeError(f"Value for {data_name!r} must be of type {data.data_type.__name__}")
+            raise TypeError(f"Value for {data.name!r} must be of type {data.data_type.__name__}")
 
         config_path = Path(cls.__config_path__).expanduser() / cls.__config_file__
 
@@ -163,3 +159,18 @@ class StaticConfigBase(StaticConfigInterface):
                 if isinstance(value, Data) and name not in fields:
                     fields[name] = value
         return fields
+
+    @classmethod
+    def _resolve_data_field(cls, data_field: Data, data_fields: dict[str, Data]) -> Data:
+        """
+        Validate that ``data_field`` belongs to the class and return it.
+        """
+        if not isinstance(data_field, Data):
+            raise TypeError("data_field must be an instance of Data.")
+
+        for field in data_fields.values():
+            if field is data_field:
+                return field
+
+        field_name = getattr(data_field, "name", repr(data_field))
+        raise KeyError(f"Data field {field_name!r} is not defined.")
