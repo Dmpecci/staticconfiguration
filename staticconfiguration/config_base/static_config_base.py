@@ -14,7 +14,6 @@ Contracts:
 from __future__ import annotations
 
 from pathlib import Path
-from os.path import expanduser
 
 from .static_config_interface import StaticConfigInterface
 from ..entities import Data
