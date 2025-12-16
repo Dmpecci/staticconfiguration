@@ -5,3 +5,4 @@ __pycache__/
 *.pyd
 plantilla_docstrings.md
 .vscode/
+test_reports/
