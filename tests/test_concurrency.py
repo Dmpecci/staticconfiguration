@@ -11,16 +11,15 @@ Locking Mechanism Overview:
     - Lock acquisition: Busy-wait loop trying to create .lock file atomically
     - Lock release: Delete .lock file in finally block
     - TTL: 10-second Time-To-Live for locks (automatic stale lock recovery)
-    - Stale detection: acquire_lock() removes locks older than TTL
-    - Reader limitation: wait_until_unlocked() does NOT clean stale locks
+    - Stale detection: _wait_until_unlocked() removes locks older than TTL
+    - Readers and writers both rely on _wait_until_unlocked() before proceeding
 
 TTL Mechanism (New):
     - Lock files store millisecond timestamp when created
-    - acquire_lock() checks timestamp via _is_lock_stale()
+    - _wait_until_unlocked() checks timestamp via _is_lock_stale()
     - Locks older than 10 seconds are automatically removed
     - Invalid locks (empty/non-numeric) treated as stale
-    - Writers auto-recover from crashed processes
-    - Readers remain blocked on stale locks (design choice)
+    - Readers and writers auto-recover from crashed processes
 
 Test Organization:
     - TestLockLifecycle: Basic lock creation and cleanup (3 tests)
@@ -34,7 +33,7 @@ Test Organization:
 Test Results:
     - 21/21 PASSED: All concurrency guarantees work as designed
     - TTL successfully prevents permanent deadlocks from crashed writers
-    - Limitation: Readers do not clean stale locks (documented by design)
+    - Readers and writers recover from stale locks via _wait_until_unlocked().
     - See CONCURRENCY_REPORT.md for full analysis and recommendations
 
 All tests use multiprocessing to simulate real concurrent process behavior.
@@ -885,21 +884,21 @@ class TestTTLMechanism:
     """
     Test suite for validating the TTL (Time-To-Live) mechanism in file locks.
     
-    The JSONBackend implements a 10-second TTL for lock files. When acquire_lock()
-    encounters a lock file older than TTL, it removes it and creates a new lock.
-    This prevents permanent deadlocks from crashed or killed processes.
+    The JSONBackend implements a 10-second TTL for lock files. When
+    _wait_until_unlocked() encounters a lock file older than TTL, it removes it
+    so readers and writers can proceed. This prevents permanent deadlocks from
+    crashed or killed processes.
     
     Key behaviors tested:
-        - Stale lock detection and automatic recovery
+        - Stale lock detection and automatic recovery (via _wait_until_unlocked)
         - Fresh lock preservation (no premature removal)
         - Invalid lock file handling (empty or non-numeric content)
-        - Reader limitations (wait_until_unlocked does not clean stale locks)
         - System resilience under concurrent stress with stale locks
     """
     
     def test_stale_lock_recovery_on_write(self, backend, temp_config_dir, sample_data_fields):
         """
-        Verify that acquire_lock() detects and removes stale locks.
+        Verify that stale locks are removed before acquisition via _wait_until_unlocked().
         
         Scenario:
             1. Create a lock file with timestamp older than TTL (>10 seconds)
@@ -1022,7 +1021,7 @@ class TestTTLMechanism:
         Expected:
             - Invalid locks are detected by _read_lock_timestamp_ms() returning None
             - _is_lock_stale() returns True for invalid locks
-            - acquire_lock() removes invalid lock and creates valid one
+            - _wait_until_unlocked() removes invalid lock so acquisition can proceed
         """
         config_path = temp_config_dir / "config.json"
         initialize_config(config_path, sample_data_fields)
@@ -1085,24 +1084,22 @@ class TestTTLMechanism:
             cleanup_locks(config_path)
             remove_json(config_path)
     
-    def test_reader_blocks_on_zombie_lock(self, backend, temp_config_dir, sample_data_fields):
+    def test_reader_recovers_from_zombie_lock(self, backend, temp_config_dir, sample_data_fields):
         """
-        Document that wait_until_unlocked() does NOT clean stale locks.
+        Verify that _wait_until_unlocked() cleans stale locks for readers.
         
         Scenario:
             1. Create a stale lock (simulating crashed writer)
             2. Attempt read operation
-            3. Verify reader blocks indefinitely
+            3. Verify reader removes stale lock and completes
         
         Expected Behavior:
-            - read_value() calls wait_until_unlocked() which only checks file existence
-            - wait_until_unlocked() does NOT call _is_lock_stale() or clean stale locks
-            - Reader remains blocked until external intervention (writer or manual cleanup)
+            - read_value() calls _wait_until_unlocked() which detects staleness
+            - Stale lock is removed by the reader's wait loop
+            - Reader completes without external intervention
         
         Design Note:
-            This is intentional behavior. Only writers (acquire_lock) clean stale locks.
-            Readers could implement stale detection, but current design keeps readers simple.
-            This test DOCUMENTS the limitation, not a bug.
+            TTL handling now lives in _wait_until_unlocked(), shared by readers and writers.
         """
         config_path = temp_config_dir / "config.json"
         initialize_config(config_path, sample_data_fields)
@@ -1120,26 +1117,15 @@ class TestTTLMechanism:
         try:
             reader.start()
             
-            # Give reader time to attempt read
-            time.sleep(1.0)
+            # Reader should clean stale lock and finish
+            reader.join(timeout=3.0)
+            assert not reader.is_alive(), "Reader should complete after cleaning stale lock"
             
-            # Verify reader is still blocked (stale lock not cleaned by reader)
-            assert reader.is_alive(), "Reader should be blocked on zombie lock"
-            assert result_queue.empty(), "Reader should not have completed"
+            # Verify lock was removed during wait
+            assert not check_lock_exists(config_path), "Stale lock should be removed by reader"
             
-            # Verify lock still exists (reader didn't clean it)
-            assert check_lock_exists(config_path), "Zombie lock should still exist"
-            
-            # Now simulate writer that cleans stale lock
-            cleanup_locks(config_path)  # Simulates writer calling acquire_lock()
-            
-            # Reader should complete now
-            reader.join(timeout=2.0)
-            assert not reader.is_alive(), "Reader should complete after lock cleanup"
-            
-            # Verify reader succeeded
             status, value = result_queue.get(timeout=1.0)
-            assert status == "success", "Reader should succeed after lock removal"
+            assert status == "success", "Reader should succeed after stale lock cleanup"
             
         finally:
             if reader.is_alive():
@@ -1158,7 +1144,7 @@ class TestTTLMechanism:
             4. Verify final state is consistent
         
         Expected:
-            - First writer to call acquire_lock() removes stale lock
+            - First writer to call _wait_until_unlocked() removes stale lock
             - Subsequent writers proceed normally
             - No deadlocks or permanent blocking
             - All writes succeed (serialized by lock mechanism)

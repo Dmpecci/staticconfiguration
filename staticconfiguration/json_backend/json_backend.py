@@ -136,7 +136,7 @@ class JSONBackend:
             FileNotFoundError: If ``config_path`` does not exist.
             json.JSONDecodeError: If the JSON content is malformed.
         """
-        self.wait_until_unlocked(config_path)
+        self._wait_until_unlocked(config_path)
         with config_path.open("r", encoding="utf-8") as json_file:
             payload = json.load(json_file)
 
@@ -210,9 +210,10 @@ class JSONBackend:
         finally:
             self.release_lock(config_path)
 
-    def wait_until_unlocked(self, config_file: Path) -> None:
+    def _wait_until_unlocked(self, config_file: Path) -> None:
         """
-        Block execution until the lock file for ``config_file`` disappears.
+        Block execution until the lock file for ``config_file`` disappears,
+        cleaning stale locks when necessary.
 
         Responsibility:
             - Poll the lock associated with ``config_file`` until no writer holds
@@ -228,6 +229,14 @@ class JSONBackend:
             config_file (Path): JSON configuration file to monitor.
         """
         while self._is_locked(config_file):
+            now_ms = int(time.time() * 1000)
+            if self._is_lock_stale(config_file, now_ms):
+                try:
+                    self._lock_path(config_file).unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+
             time.sleep(self._sleep_interval)
 
     def acquire_lock(self, config_file: Path) -> None:
@@ -236,8 +245,7 @@ class JSONBackend:
 
         Responsibility:
             - Block until the ``.lock`` companion file can be created, marking
-              the caller as the active writer. If a stale lock is detected, it is
-              removed before retrying acquisition.
+              the caller as the active writer.
 
         Contracts:
             Preconditions:
@@ -249,20 +257,11 @@ class JSONBackend:
             config_file (Path): JSON configuration file to lock for writing.
         """
         config_file.parent.mkdir(parents=True, exist_ok=True)
+        self._wait_until_unlocked(config_file)
 
         while True:
             if self._try_create_lock(config_file):
                 return
-
-            now_ms = int(time.time() * 1000)
-
-            if self._is_lock_stale(config_file, now_ms):
-                try:
-                    self._lock_path(config_file).unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-
             time.sleep(self._sleep_interval)
 
     def release_lock(self, config_file: Path) -> None:
@@ -357,8 +356,8 @@ class JSONBackend:
         Returns:
             int | None: Timestamp in milliseconds if available; otherwise None.
         """
-        lock_path = self._lock_path(config_file)
         try:
+            lock_path = self._lock_path(config_file)
             with lock_path.open("r", encoding="utf-8") as lock_file:
                 content = lock_file.read().strip()
         except OSError:
