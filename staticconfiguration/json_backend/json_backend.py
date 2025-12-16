@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 from staticconfiguration.entities import Data
 
 class JSONBackend:
@@ -38,6 +39,7 @@ class JSONBackend:
               ``version``, ``created``, ``last_modified``, and ``data`` when
               preconditions are met.
     """
+    _sleep_interval: float = 0.05
 
     def ensure_initialized(self, config_path: Path, version: str, data_fields: list[Data]) -> None:
         """
@@ -133,6 +135,7 @@ class JSONBackend:
             FileNotFoundError: If ``config_path`` does not exist.
             json.JSONDecodeError: If the JSON content is malformed.
         """
+        self.wait_until_unlocked(config_path)
         with config_path.open("r", encoding="utf-8") as json_file:
             payload = json.load(json_file)
 
@@ -181,23 +184,162 @@ class JSONBackend:
             json.JSONDecodeError: If the JSON file is corrupted.
             OSError: If the write/rename of the temporary file fails.
         """
-        with config_path.open("r", encoding="utf-8") as json_file:
-            payload = json.load(json_file)
+        self.acquire_lock(config_path)
+        try:
+            with config_path.open("r", encoding="utf-8") as json_file:
+                payload = json.load(json_file)
 
-        encoded_value = data.encoder(new_value) if data.encoder else new_value
-        payload["data"][data.name] = encoded_value
+            encoded_value = data.encoder(new_value) if data.encoder else new_value
+            payload["data"][data.name] = encoded_value
 
-        timestamp = (
-            datetime.now(timezone.utc)
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
-        payload["last_modified"] = timestamp
+            timestamp = (
+                datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            payload["last_modified"] = timestamp
 
-        tmp_path = config_path.with_suffix(".tmp")
+            tmp_path = config_path.with_suffix(".tmp")
 
-        with tmp_path.open("w", encoding="utf-8") as json_file:
-            json.dump(payload, json_file, indent=2)
+            with tmp_path.open("w", encoding="utf-8") as json_file:
+                json.dump(payload, json_file, indent=2)
 
-        tmp_path.replace(config_path)
+            tmp_path.replace(config_path)
+        finally:
+            self.release_lock(config_path)
+
+    def wait_until_unlocked(self, config_file: Path) -> None:
+        """
+        Block execution until the lock file for ``config_file`` disappears.
+
+        Responsibility:
+            - Poll the lock associated with ``config_file`` until no writer holds
+              it, allowing safe read access.
+
+        Contracts:
+            Preconditions:
+                - ``config_file`` is the JSON configuration path to observe.
+            Postconditions:
+                - Returns only when the corresponding ``.lock`` file is absent.
+
+        Args:
+            config_file (Path): JSON configuration file to monitor.
+        """
+        while self._is_locked(config_file):
+            time.sleep(self._sleep_interval)
+
+    def acquire_lock(self, config_file: Path) -> None:
+        """
+        Acquire exclusive access to ``config_file`` by creating its lock.
+
+        Responsibility:
+            - Block until the ``.lock`` companion file can be created, marking
+              the caller as the active writer.
+
+        Contracts:
+            Preconditions:
+                - ``config_file`` points to the JSON configuration file to lock.
+            Postconditions:
+                - The ``.lock`` file exists after successful acquisition.
+
+        Args:
+            config_file (Path): JSON configuration file to lock for writing.
+        """
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+
+        while True:
+            if self._try_create_lock(config_file):
+                return
+            time.sleep(self._sleep_interval)
+
+    def release_lock(self, config_file: Path) -> None:
+        """
+        Release the lock associated with ``config_file``.
+
+        Responsibility:
+            - Delete the ``.lock`` file created during acquisition to free the
+              resource.
+
+        Contracts:
+            Preconditions:
+                - The caller previously acquired the lock for ``config_file``.
+            Postconditions:
+                - The ``.lock`` file is removed.
+
+        Args:
+            config_file (Path): JSON configuration file whose lock is released.
+        """
+        self._lock_path(config_file).unlink()
+
+    def _lock_path(self, config_file: Path) -> Path:
+        """
+        Compute the lock file path for ``config_file``.
+
+        Responsibility:
+            - Derive the companion ``.lock`` file path colocated with the JSON
+              configuration file.
+
+        Contracts:
+            Preconditions:
+                - ``config_file`` is a Path pointing to the JSON file.
+            Postconditions:
+                - Returns a Path ending with ``.lock`` in the same directory.
+
+        Args:
+            config_file (Path): JSON configuration file to lock.
+
+        Returns:
+            Path: Path to the lock file.
+        """
+        return config_file.with_suffix(config_file.suffix + ".lock")
+
+    def _try_create_lock(self, config_file: Path) -> bool:
+        """
+        Attempt to create the lock file atomically.
+
+        Responsibility:
+            - Create the ``.lock`` file when it does not exist, signaling
+              exclusive ownership.
+
+        Contracts:
+            Preconditions:
+                - ``config_file`` is a Path to the JSON configuration file.
+            Postconditions:
+                - Returns True if the lock file is created, False if it already
+                  exists.
+
+        Args:
+            config_file (Path): JSON configuration file whose lock is acquired.
+
+        Returns:
+            bool: True when the lock file is created; False otherwise.
+        """
+        lock_path = self._lock_path(config_file)
+        try:
+            with lock_path.open("x", encoding="utf-8") as lock_file:
+                lock_file.write(str(int(time.time() * 1000)))
+            return True
+        except FileExistsError:
+            return False
+
+    def _is_locked(self, config_file: Path) -> bool:
+        """
+        Determine whether ``config_file`` is currently locked.
+
+        Responsibility:
+            - Check for the presence of the companion ``.lock`` file.
+
+        Contracts:
+            Preconditions:
+                - ``config_file`` is a Path to the JSON configuration file.
+            Postconditions:
+                - Returns True if the ``.lock`` file exists; False otherwise.
+
+        Args:
+            config_file (Path): JSON configuration file to check.
+
+        Returns:
+            bool: True when the resource is locked; False otherwise.
+        """
+        return self._lock_path(config_file).exists()
