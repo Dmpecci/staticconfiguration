@@ -147,7 +147,7 @@ def _inject_config_base_inheritance(cls: type) -> type:
     return new_class
 
 
-def decorate_settings_class(cls: type) -> type:
+def staticconfig(cls: type) -> type:
     """
     Decorate a settings class to enable static configuration functionality.
 
@@ -177,7 +177,7 @@ def decorate_settings_class(cls: type) -> type:
             duplicated.
 
     Example:
-        >>> @decorate_settings_class
+        >>> @staticconfig
         >>> class AppConfig:
         >>>     __config_file__ = "app.json"
         >>>     __version__ = "1.0.0"
@@ -189,9 +189,6 @@ def decorate_settings_class(cls: type) -> type:
     _verify_data_fields(cls)
 
     return _inject_config_base_inheritance(cls)
-
-
-staticconfig = decorate_settings_class
 
 __all__ = [
     "staticconfig",

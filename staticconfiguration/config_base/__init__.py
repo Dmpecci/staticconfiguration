@@ -9,7 +9,7 @@ Contracts:
     - All exports are designed to work together as a cohesive system.
 """
 
-from .decorator import staticconfig, decorate_settings_class
+from .decorator import staticconfig
 from .static_config_base import StaticConfigBase
 from .static_config_interface import StaticConfigInterface
 

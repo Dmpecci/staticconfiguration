@@ -158,8 +158,9 @@ class StaticConfigBase(StaticConfigInterface):
             >>> MyConfig._get_data_fields()
             {'timeout': Data(...), 'retries': Data(...)}
         """
-        return {
-            name: value
-            for name, value in cls.__dict__.items()
-            if isinstance(value, Data)
-        }
+        fields = {}
+        for base in cls.__mro__:
+            for name, value in base.__dict__.items():
+                if isinstance(value, Data) and name not in fields:
+                    fields[name] = value
+        return fields
