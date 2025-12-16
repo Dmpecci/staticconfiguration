@@ -40,6 +40,7 @@ class JSONBackend:
               preconditions are met.
     """
     _sleep_interval: float = 0.05
+    _lock_ttl_seconds: float = 10.0
 
     def ensure_initialized(self, config_path: Path, version: str, data_fields: list[Data]) -> None:
         """
@@ -235,7 +236,8 @@ class JSONBackend:
 
         Responsibility:
             - Block until the ``.lock`` companion file can be created, marking
-              the caller as the active writer.
+              the caller as the active writer. If a stale lock is detected, it is
+              removed before retrying acquisition.
 
         Contracts:
             Preconditions:
@@ -251,6 +253,16 @@ class JSONBackend:
         while True:
             if self._try_create_lock(config_file):
                 return
+
+            now_ms = int(time.time() * 1000)
+
+            if self._is_lock_stale(config_file, now_ms):
+                try:
+                    self._lock_path(config_file).unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+
             time.sleep(self._sleep_interval)
 
     def release_lock(self, config_file: Path) -> None:
@@ -322,6 +334,76 @@ class JSONBackend:
             return True
         except FileExistsError:
             return False
+
+    def _read_lock_timestamp_ms(self, config_file: Path) -> int | None:
+        """
+        Read the timestamp stored inside the lock file.
+
+        Responsibility:
+            - Extract the millisecond epoch written when the lock was created.
+
+        Contracts:
+            Preconditions:
+                - ``config_file`` refers to the JSON configuration file whose
+                  lock may exist.
+            Postconditions:
+                - Returns the parsed integer timestamp in milliseconds when
+                  readable; otherwise returns None.
+
+        Args:
+            config_file (Path): JSON configuration file whose lock timestamp is
+                read.
+
+        Returns:
+            int | None: Timestamp in milliseconds if available; otherwise None.
+        """
+        lock_path = self._lock_path(config_file)
+        try:
+            with lock_path.open("r", encoding="utf-8") as lock_file:
+                content = lock_file.read().strip()
+        except OSError:
+            return None
+
+        if not content:
+            return None
+
+        try:
+            return int(content)
+        except ValueError:
+            return None
+
+    def _is_lock_stale(self, config_file: Path, now_ms: int) -> bool:
+        """
+        Determine whether the lock for ``config_file`` is stale.
+
+        Responsibility:
+            - Decide if the existing lock should be considered expired based on
+              its stored timestamp and the configured TTL.
+
+        Contracts:
+            Preconditions:
+                - ``config_file`` is a Path to the JSON configuration file.
+                - ``now_ms`` is the current epoch time in milliseconds.
+            Postconditions:
+                - Returns True when the lock is expired or invalid; False when
+                  it is still valid or absent.
+
+        Args:
+            config_file (Path): JSON configuration file whose lock is evaluated.
+            now_ms (int): Current epoch time in milliseconds.
+
+        Returns:
+            bool: True if the lock is stale; False otherwise.
+        """
+        if not self._is_locked(config_file):
+            return False
+
+        timestamp_ms = self._read_lock_timestamp_ms(config_file)
+        if timestamp_ms is None:
+            return True
+
+        ttl_ms = int(self._lock_ttl_seconds * 1000)
+        return now_ms - timestamp_ms >= ttl_ms
 
     def _is_locked(self, config_file: Path) -> bool:
         """

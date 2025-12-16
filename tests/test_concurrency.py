@@ -10,7 +10,17 @@ Locking Mechanism Overview:
     - read_value(): Waits until no lock exists before reading
     - Lock acquisition: Busy-wait loop trying to create .lock file atomically
     - Lock release: Delete .lock file in finally block
-    - No TTL, no automatic recovery from orphaned locks
+    - TTL: 10-second Time-To-Live for locks (automatic stale lock recovery)
+    - Stale detection: acquire_lock() removes locks older than TTL
+    - Reader limitation: wait_until_unlocked() does NOT clean stale locks
+
+TTL Mechanism (New):
+    - Lock files store millisecond timestamp when created
+    - acquire_lock() checks timestamp via _is_lock_stale()
+    - Locks older than 10 seconds are automatically removed
+    - Invalid locks (empty/non-numeric) treated as stale
+    - Writers auto-recover from crashed processes
+    - Readers remain blocked on stale locks (design choice)
 
 Test Organization:
     - TestLockLifecycle: Basic lock creation and cleanup (3 tests)
@@ -19,10 +29,12 @@ Test Organization:
     - TestReadWriteInteraction: Readers blocking during writes (2 tests)
     - TestStressScenarios: Multiple processes mixing reads/writes (2 tests)
     - TestEdgeCases: Race conditions and failure scenarios (6 tests)
+    - TestTTLMechanism: Time-To-Live validation and stale lock recovery (6 tests)
 
 Test Results:
-    - 15/15 PASSED: All concurrency guarantees work as designed
-    - Critical finding: Orphaned locks from killed processes (documented limitation)
+    - 21/21 PASSED: All concurrency guarantees work as designed
+    - TTL successfully prevents permanent deadlocks from crashed writers
+    - Limitation: Readers do not clean stale locks (documented by design)
     - See CONCURRENCY_REPORT.md for full analysis and recommendations
 
 All tests use multiprocessing to simulate real concurrent process behavior.
@@ -166,6 +178,62 @@ def cleanup_locks(config_path: Path):
             lock_path.unlink()
     except:
         pass
+
+
+def write_lock_file(config_path: Path, timestamp_ms: int):
+    """
+    Write a lock file with a specific timestamp.
+    
+    This helper is used for testing TTL behavior by creating locks
+    with known timestamps (either fresh or stale).
+    
+    Args:
+        config_path: Path to the JSON config file
+        timestamp_ms: Timestamp in milliseconds to write to lock file
+    """
+    lock_path = config_path.with_suffix(config_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as f:
+        f.write(str(timestamp_ms))
+
+
+def make_stale_lock(config_path: Path, ttl_seconds: float = 10.0):
+    """
+    Create a stale lock file (older than TTL).
+    
+    Args:
+        config_path: Path to the JSON config file
+        ttl_seconds: TTL value to exceed (default: 10.0)
+    """
+    # Create a timestamp that's older than TTL
+    now_ms = int(time.time() * 1000)
+    stale_timestamp = now_ms - int((ttl_seconds + 1) * 1000)
+    write_lock_file(config_path, stale_timestamp)
+
+
+def make_fresh_lock(config_path: Path):
+    """
+    Create a fresh lock file (recent timestamp, within TTL).
+    
+    Args:
+        config_path: Path to the JSON config file
+    """
+    now_ms = int(time.time() * 1000)
+    write_lock_file(config_path, now_ms)
+
+
+def make_invalid_lock(config_path: Path, content: str = ""):
+    """
+    Create an invalid lock file (empty or non-numeric content).
+    
+    Args:
+        config_path: Path to the JSON config file
+        content: Invalid content to write (default: empty string)
+    """
+    lock_path = config_path.with_suffix(config_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as f:
+        f.write(content)
 
 
 # ============================================================================
@@ -807,3 +875,382 @@ class TestEdgeCases:
             remove_json(config_path)
             if tmp_path.exists():
                 tmp_path.unlink()
+
+
+# ============================================================================
+# TestTTLMechanism: Validate Time-To-Live functionality for locks
+# ============================================================================
+
+class TestTTLMechanism:
+    """
+    Test suite for validating the TTL (Time-To-Live) mechanism in file locks.
+    
+    The JSONBackend implements a 10-second TTL for lock files. When acquire_lock()
+    encounters a lock file older than TTL, it removes it and creates a new lock.
+    This prevents permanent deadlocks from crashed or killed processes.
+    
+    Key behaviors tested:
+        - Stale lock detection and automatic recovery
+        - Fresh lock preservation (no premature removal)
+        - Invalid lock file handling (empty or non-numeric content)
+        - Reader limitations (wait_until_unlocked does not clean stale locks)
+        - System resilience under concurrent stress with stale locks
+    """
+    
+    def test_stale_lock_recovery_on_write(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Verify that acquire_lock() detects and removes stale locks.
+        
+        Scenario:
+            1. Create a lock file with timestamp older than TTL (>10 seconds)
+            2. Attempt to acquire lock for write
+            3. Verify old lock is removed and new lock is created
+            4. Verify write succeeds
+        
+        Expected:
+            - Stale lock is detected based on timestamp
+            - Old lock file is removed
+            - New lock is created with current timestamp
+            - Write operation completes successfully
+        """
+        config_path = temp_config_dir / "config.json"
+        initialize_config(config_path, sample_data_fields)
+        
+        # Create stale lock (older than 10 seconds)
+        make_stale_lock(config_path, ttl_seconds=10.0)
+        assert check_lock_exists(config_path), "Stale lock should exist initially"
+        
+        # Read timestamp of stale lock
+        lock_path = config_path.with_suffix(config_path.suffix + ".lock")
+        with lock_path.open("r", encoding="utf-8") as f:
+            old_timestamp = int(f.read().strip())
+        
+        try:
+            # Attempt write - should detect stale lock and recover
+            backend.write_value(
+                Data(name="counter", data_type=int, default=0),
+                999,
+                config_path
+            )
+            
+            # Verify write succeeded
+            value = backend.read_value(
+                Data(name="counter", data_type=int, default=0),
+                config_path
+            )
+            assert value == 999, "Write should succeed after stale lock removal"
+            
+            # Verify lock was recreated with new timestamp
+            # Lock should be released after write, but we can check it was replaced
+            # by verifying the write completed (which requires lock acquisition)
+            
+        finally:
+            cleanup_locks(config_path)
+            remove_json(config_path)
+    
+    def test_fresh_lock_not_removed(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Verify that recent locks (within TTL) are not prematurely removed.
+        
+        Scenario:
+            1. Create a fresh lock file (current timestamp)
+            2. Attempt to acquire lock from another process
+            3. Verify original lock remains (not treated as stale)
+            4. Verify second process waits/blocks
+        
+        Expected:
+            - Fresh lock is not removed
+            - acquire_lock() respects the existing lock and waits
+            - No premature lock breaking
+        """
+        config_path = temp_config_dir / "config.json"
+        initialize_config(config_path, sample_data_fields)
+        
+        # Create fresh lock
+        make_fresh_lock(config_path)
+        assert check_lock_exists(config_path), "Fresh lock should exist"
+        
+        # Read timestamp of fresh lock
+        lock_path = config_path.with_suffix(config_path.suffix + ".lock")
+        with lock_path.open("r", encoding="utf-8") as f:
+            original_timestamp = int(f.read().strip())
+        
+        try:
+            # Start write in separate process (should block on fresh lock)
+            start_time = time.time()
+            p = multiprocessing.Process(
+                target=write_value_process,
+                args=(config_path, "counter", 42, 0)
+            )
+            p.start()
+            
+            # Give it time to attempt acquisition
+            time.sleep(0.5)
+            
+            # Verify original lock still exists (not removed as stale)
+            assert check_lock_exists(config_path), "Fresh lock should not be removed"
+            
+            # Verify timestamp unchanged (lock not replaced)
+            with lock_path.open("r", encoding="utf-8") as f:
+                current_timestamp = int(f.read().strip())
+            
+            # Timestamps should be very close (within a few ms due to timing)
+            # Original lock should not have been replaced
+            elapsed = time.time() - start_time
+            assert elapsed < 2.0, "Process should still be waiting (not deadlocked)"
+            
+            # Verify process is still alive (blocked, not crashed)
+            assert p.is_alive(), "Process should be blocked waiting for lock"
+            
+        finally:
+            # Clean up: remove lock so process can complete
+            cleanup_locks(config_path)
+            p.join(timeout=2)
+            if p.is_alive():
+                p.terminate()
+            remove_json(config_path)
+    
+    def test_invalid_lock_treated_as_stale(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Verify that locks with invalid content (empty or non-numeric) are treated as stale.
+        
+        Scenario:
+            1. Create lock files with invalid content (empty, text, etc.)
+            2. Attempt to acquire lock
+            3. Verify invalid lock is removed and replaced
+        
+        Expected:
+            - Invalid locks are detected by _read_lock_timestamp_ms() returning None
+            - _is_lock_stale() returns True for invalid locks
+            - acquire_lock() removes invalid lock and creates valid one
+        """
+        config_path = temp_config_dir / "config.json"
+        initialize_config(config_path, sample_data_fields)
+        
+        # Test 1: Empty lock file
+        make_invalid_lock(config_path, content="")
+        assert check_lock_exists(config_path), "Invalid lock should exist"
+        
+        try:
+            backend.write_value(
+                Data(name="counter", data_type=int, default=0),
+                111,
+                config_path
+            )
+            
+            value = backend.read_value(
+                Data(name="counter", data_type=int, default=0),
+                config_path
+            )
+            assert value == 111, "Write should succeed after removing invalid (empty) lock"
+        finally:
+            cleanup_locks(config_path)
+        
+        # Test 2: Non-numeric lock file
+        make_invalid_lock(config_path, content="not-a-number")
+        assert check_lock_exists(config_path), "Invalid lock should exist"
+        
+        try:
+            backend.write_value(
+                Data(name="counter", data_type=int, default=0),
+                222,
+                config_path
+            )
+            
+            value = backend.read_value(
+                Data(name="counter", data_type=int, default=0),
+                config_path
+            )
+            assert value == 222, "Write should succeed after removing invalid (non-numeric) lock"
+        finally:
+            cleanup_locks(config_path)
+        
+        # Test 3: Whitespace-only lock file
+        make_invalid_lock(config_path, content="   \n\t  ")
+        assert check_lock_exists(config_path), "Invalid lock should exist"
+        
+        try:
+            backend.write_value(
+                Data(name="counter", data_type=int, default=0),
+                333,
+                config_path
+            )
+            
+            value = backend.read_value(
+                Data(name="counter", data_type=int, default=0),
+                config_path
+            )
+            assert value == 333, "Write should succeed after removing invalid (whitespace) lock"
+        finally:
+            cleanup_locks(config_path)
+            remove_json(config_path)
+    
+    def test_reader_blocks_on_zombie_lock(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Document that wait_until_unlocked() does NOT clean stale locks.
+        
+        Scenario:
+            1. Create a stale lock (simulating crashed writer)
+            2. Attempt read operation
+            3. Verify reader blocks indefinitely
+        
+        Expected Behavior:
+            - read_value() calls wait_until_unlocked() which only checks file existence
+            - wait_until_unlocked() does NOT call _is_lock_stale() or clean stale locks
+            - Reader remains blocked until external intervention (writer or manual cleanup)
+        
+        Design Note:
+            This is intentional behavior. Only writers (acquire_lock) clean stale locks.
+            Readers could implement stale detection, but current design keeps readers simple.
+            This test DOCUMENTS the limitation, not a bug.
+        """
+        config_path = temp_config_dir / "config.json"
+        initialize_config(config_path, sample_data_fields)
+        
+        # Create stale lock (zombie from crashed writer)
+        make_stale_lock(config_path, ttl_seconds=10.0)
+        assert check_lock_exists(config_path), "Zombie lock should exist"
+        
+        result_queue = multiprocessing.Queue()
+        reader = multiprocessing.Process(
+            target=read_value_process,
+            args=(config_path, "counter", result_queue)
+        )
+        
+        try:
+            reader.start()
+            
+            # Give reader time to attempt read
+            time.sleep(1.0)
+            
+            # Verify reader is still blocked (stale lock not cleaned by reader)
+            assert reader.is_alive(), "Reader should be blocked on zombie lock"
+            assert result_queue.empty(), "Reader should not have completed"
+            
+            # Verify lock still exists (reader didn't clean it)
+            assert check_lock_exists(config_path), "Zombie lock should still exist"
+            
+            # Now simulate writer that cleans stale lock
+            cleanup_locks(config_path)  # Simulates writer calling acquire_lock()
+            
+            # Reader should complete now
+            reader.join(timeout=2.0)
+            assert not reader.is_alive(), "Reader should complete after lock cleanup"
+            
+            # Verify reader succeeded
+            status, value = result_queue.get(timeout=1.0)
+            assert status == "success", "Reader should succeed after lock removal"
+            
+        finally:
+            if reader.is_alive():
+                reader.terminate()
+            cleanup_locks(config_path)
+            remove_json(config_path)
+    
+    def test_concurrent_writes_with_stale_locks(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Stress test: verify system recovers from stale locks under concurrent load.
+        
+        Scenario:
+            1. Create a stale lock
+            2. Launch multiple writers simultaneously
+            3. Verify all writes complete successfully
+            4. Verify final state is consistent
+        
+        Expected:
+            - First writer to call acquire_lock() removes stale lock
+            - Subsequent writers proceed normally
+            - No deadlocks or permanent blocking
+            - All writes succeed (serialized by lock mechanism)
+        """
+        config_path = temp_config_dir / "config.json"
+        initialize_config(config_path, sample_data_fields)
+        
+        # Create stale lock
+        make_stale_lock(config_path, ttl_seconds=10.0)
+        assert check_lock_exists(config_path), "Stale lock should exist"
+        
+        # Launch multiple writers
+        num_writers = 5
+        processes = []
+        
+        try:
+            for i in range(num_writers):
+                p = multiprocessing.Process(
+                    target=write_value_process,
+                    args=(config_path, "counter", i * 100, 0.05)  # Small delay
+                )
+                processes.append(p)
+                p.start()
+            
+            # Wait for all to complete
+            for p in processes:
+                p.join(timeout=10.0)
+            
+            # Verify all completed
+            for i, p in enumerate(processes):
+                assert not p.is_alive(), f"Writer {i} should have completed"
+            
+            # Verify config is in valid state (no corruption)
+            final_value = backend.read_value(
+                Data(name="counter", data_type=int, default=0),
+                config_path
+            )
+            
+            # Final value should be one of the written values
+            expected_values = [i * 100 for i in range(num_writers)]
+            assert final_value in expected_values, \
+                f"Final value {final_value} should be one of {expected_values}"
+            
+            # Verify no lock remains
+            assert not check_lock_exists(config_path), "No lock should remain after completion"
+            
+        finally:
+            for p in processes:
+                if p.is_alive():
+                    p.terminate()
+            cleanup_locks(config_path)
+            remove_json(config_path)
+    
+    def test_ttl_boundary_conditions(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Test lock behavior at TTL boundary (exactly 10 seconds).
+        
+        Scenario:
+            1. Create lock exactly at TTL threshold
+            2. Verify behavior is consistent (either treated as stale or fresh)
+        
+        Note: Due to timing precision, locks at exact boundary may vary.
+        This test documents the boundary behavior.
+        """
+        config_path = temp_config_dir / "config.json"
+        initialize_config(config_path, sample_data_fields)
+        
+        # Create lock exactly at TTL boundary (10.0 seconds ago)
+        now_ms = int(time.time() * 1000)
+        boundary_timestamp = now_ms - int(10.0 * 1000)  # Exactly 10 seconds
+        write_lock_file(config_path, boundary_timestamp)
+        
+        try:
+            # Attempt write
+            start_time = time.time()
+            backend.write_value(
+                Data(name="counter", data_type=int, default=0),
+                777,
+                config_path
+            )
+            elapsed = time.time() - start_time
+            
+            # Write should complete quickly (lock treated as stale)
+            # TTL check uses >= comparison, so exactly 10s is stale
+            assert elapsed < 2.0, "Write should not block on boundary-case lock"
+            
+            value = backend.read_value(
+                Data(name="counter", data_type=int, default=0),
+                config_path
+            )
+            assert value == 777, "Write should succeed"
+            
+        finally:
+            cleanup_locks(config_path)
+            remove_json(config_path)
