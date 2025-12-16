@@ -1,14 +1,14 @@
 """
-Responsabilidad:
-    - Proveer un backend simple basado en archivos JSON para almacenar y recuperar
-        valores de configuración estructurados. Agrupa las operaciones necesarias
-        para inicializar, leer y escribir el archivo de configuración.
+Responsibility:
+    - Provide a simple JSON file-based backend to store and retrieve structured
+      configuration values. Group the necessary operations to initialize, read,
+      and write the configuration file.
 
-Contratos:
-    - El backend asume que el sistema de archivos está disponible y que el
-        proceso tiene permisos de lectura/escritura sobre la ruta objetivo.
-    - Los métodos esperan recibir objetos de tipo `pathlib.Path` válidos y
-        objetos `Data` definidos en `staticconfiguration.entities`.
+Contracts:
+    - The backend assumes the filesystem is available and the process has
+      read/write permissions on the target path.
+    - Methods expect to receive valid pathlib.Path objects and Data objects
+      defined in staticconfiguration.entities.
 """
 
 from __future__ import annotations
@@ -19,63 +19,60 @@ from staticconfiguration.entities import Data
 
 class JSONBackend:
     """
-    Backend para persistencia en JSON de configuraciones estáticas.
+    Backend for JSON persistence of static configurations.
 
-    Responsabilidad:
-        - Manejar la creación inicial del archivo de configuración JSON,
-            así como la lectura y escritura de valores individuales.
+    Responsibility:
+        - Handle initial creation of the JSON configuration file, as well as
+          reading and writing individual values.
 
-    Contratos:
-        Invariantes:
-            - Ningún método modifica rutas distintas a las proporcionadas por
-                sus argumentos.
-        Precondiciones:
-            - `config_path` debe ser un `pathlib.Path` apuntando al archivo
-                o a la ubicación donde se creará.
-            - `data_fields` es una lista de `Data` válida que describe campos
-                y posibles `encoder`/`decoder` asociados.
-        Postcondiciones:
-            - Tras `ensure_initialized`, existe un archivo JSON con claves
-                `version`, `created`, `last_modified` y `data` cuando las
-                precondiciones se cumplen.
+    Contracts:
+        Invariants:
+            - No method modifies paths other than those provided by its arguments.
+        Preconditions:
+            - ``config_path`` must be a pathlib.Path pointing to the file or the
+              location where it will be created.
+            - ``data_fields`` is a valid list of Data describing fields and
+              possible associated encoder/decoder.
+        Postconditions:
+            - After ``ensure_initialized``, a JSON file exists with keys
+              ``version``, ``created``, ``last_modified``, and ``data`` when
+              preconditions are met.
     """
 
     def ensure_initialized(self, config_path: Path, version: str, data_fields: list[Data]) -> None:
         """
-        Asegurar la existencia inicial del archivo de configuración JSON.
+        Ensure initial existence of the JSON configuration file.
 
-        Responsabilidad:
-            - Crear el archivo JSON de configuración con una estructura mínima
-                (metadatos y valores por defecto) si no existe.
+        Responsibility:
+            - Create the JSON configuration file with a minimal structure
+              (metadata and default values) if it does not exist.
 
-        Contratos:
-            Precondiciones:
-                - `config_path` es un `pathlib.Path` válido y apunta al archivo
-                    destino (no a un directorio inexistente sin permisos).
-                - `version` es una cadena no vacía que representa la versión
-                    del esquema de configuración.
-                - `data_fields` es una lista de instancias `Data` donde cada
-                    elemento tiene atributos `name`, `data_type` y `default`.
-            Postcondiciones:
-                - Si el archivo no existía, queda creado con claves
-                    `version`, `created`, `last_modified` y `data` que contiene
-                    los valores por defecto (posiblemente codificados mediante
-                    `Data.encoder` si está presente).
+        Contracts:
+            Preconditions:
+                - ``config_path`` is a valid pathlib.Path pointing to the target
+                  file (not to a nonexistent directory without permissions).
+                - ``version`` is a non-empty string representing the configuration
+                  schema version.
+                - ``data_fields`` is a list of Data instances where each element
+                  has ``name``, ``data_type``, and ``default`` attributes.
+            Postconditions:
+                - If the file did not exist, it is created with keys ``version``,
+                  ``created``, ``last_modified``, and ``data`` containing default
+                  values (possibly encoded via ``Data.encoder`` if present).
 
         Args:
-            config_path (Path): Ruta al archivo JSON de configuración.
-            version (str): Versión del esquema de configuración a almacenar.
-            data_fields (list[Data]): Lista de descriptores `Data` para los
-                campos a inicializar con sus valores por defecto.
+            config_path (Path): Path to the JSON configuration file.
+            version (str): Configuration schema version to store.
+            data_fields (list[Data]): List of Data descriptors for fields to
+                initialize with their default values.
 
         Returns:
-            None: No devuelve valor; garantiza la creación del archivo si
-                éste no existía.
+            None: Does not return a value; ensures file creation if it did not
+                exist.
 
         Raises:
-            AssertionError: Si las precondiciones no se cumplen (modo debug).
-            OSError: Si no es posible crear el directorio o escribir el archivo
-                por problemas del sistema de archivos.
+            OSError: If it is not possible to create the directory or write the
+                file due to filesystem issues.
         """
         if config_path.exists():
             return
@@ -106,36 +103,35 @@ class JSONBackend:
 
     def read_value(self, data: Data, config_path: Path):
         """
-        Leer y decodificar el valor de una clave de configuración desde el JSON.
+        Read and decode the value of a configuration key from JSON.
 
-        Responsabilidad:
-            - Recuperar el valor almacenado para el `Data` proporcionado desde
-            el archivo JSON y devolverlo en su representación de dominio
-            (aplicando `Data.decoder` si está disponible o realizando la
-            conversión mediante `data.data_type`).
+        Responsibility:
+            - Retrieve the stored value for the provided Data from the JSON file
+              and return it in its domain representation (applying ``Data.decoder``
+              if available or performing conversion via ``data.data_type``).
 
-        Contratos:
-            Precondiciones:
-                - `config_path` existe y es legible.
-                - `data` es una instancia válida de `Data` con atributo
-                `name` definido.
-            Postcondiciones:
-                - Devuelve `None` sólo si el valor es `null` en JSON o si
-                `data.default` es `None` y no existe la clave.
-                - Si `data.decoder` está presente, la salida es el resultado
-                de `data.decoder(raw_value)`.
+        Contracts:
+            Preconditions:
+                - ``config_path`` exists and is readable.
+                - ``data`` is a valid Data instance with a defined ``name``
+                  attribute.
+            Postconditions:
+                - Returns ``None`` only if the value is ``null`` in JSON or if
+                  ``data.default`` is ``None`` and the key does not exist.
+                - If ``data.decoder`` is present, the output is the result of
+                  ``data.decoder(raw_value)``.
 
         Args:
-            data (Data): Descriptor del campo cuya clave se desea leer.
-            config_path (Path): Ruta al archivo JSON de configuración.
+            data (Data): Descriptor of the field whose key is to be read.
+            config_path (Path): Path to the JSON configuration file.
 
         Returns:
-            object | None: Valor decodificado correspondiente al campo `data`,
-                o `None` si no hay valor y el `default` es `None`.
+            object | None: Decoded value corresponding to the ``data`` field,
+                or ``None`` if there is no value and ``default`` is ``None``.
 
         Raises:
-            FileNotFoundError: Si `config_path` no existe.
-            json.JSONDecodeError: Si el contenido JSON está mal formado.
+            FileNotFoundError: If ``config_path`` does not exist.
+            json.JSONDecodeError: If the JSON content is malformed.
         """
         with config_path.open("r", encoding="utf-8") as json_file:
             payload = json.load(json_file)
@@ -152,39 +148,38 @@ class JSONBackend:
 
     def write_value(self, data: Data, new_value, config_path: Path):
         """
-        Escribir o actualizar el valor de un campo en el archivo de configuración JSON.
+        Write or update the value of a field in the JSON configuration file.
 
-        Responsabilidad:
-            - Persistir `new_value` para la clave descrita por `data`, actualizando
-            la marca temporal `last_modified` y aplicando `Data.encoder` si
-            está presente.
+        Responsibility:
+            - Persist ``new_value`` for the key described by ``data``, updating
+              the ``last_modified`` timestamp and applying ``Data.encoder`` if
+              present.
 
-        Contratos:
-            Precondiciones:
-                - `config_path` existe y es escribible (o el proceso puede
-                crear/reescribir el archivo temporalmente en la misma
-                ubicación).
-                - `data` es una instancia válida de `Data` y new_value es un valor 
-                que puede ser serializado directamente o mediante Data.encoder.
-            Postcondiciones:
-                - El archivo JSON contendrá el valor actualizado en
-                `payload['data'][data.name]` (posiblemente codificado).
-                - `payload['last_modified']` reflejará la hora de la escritura
-                en formato ISO 8601 UTC sin microsegundos.
+        Contracts:
+            Preconditions:
+                - ``config_path`` exists and is writable (or the process can
+                  create/rewrite the file temporarily in the same location).
+                - ``data`` is a valid Data instance and ``new_value`` is a value
+                  that can be serialized directly or via ``Data.encoder``.
+            Postconditions:
+                - The JSON file will contain the updated value in
+                  ``payload['data'][data.name]`` (possibly encoded).
+                - ``payload['last_modified']`` will reflect the write time in
+                  ISO 8601 UTC format without microseconds.
 
         Args:
-            data (Data): Descriptor del campo a actualizar.
-            new_value (Any): Nuevo valor a almacenar para el campo.
-            config_path (Path): Ruta al archivo JSON de configuración.
+            data (Data): Descriptor of the field to update.
+            new_value (Any): New value to store for the field.
+            config_path (Path): Path to the JSON configuration file.
 
         Returns:
-            None: No devuelve valor; persiste el nuevo estado en disco.
+            None: Does not return a value; persists the new state to disk.
 
         Raises:
-            FileNotFoundError: Si `config_path` no existe al intentar leerlo.
-            json.JSONDecodeError: Si el archivo JSON está corrupto.
-            OSError: Si falla la escritura/renombrado del archivo temporal.
-            AssertionError: Si las precondiciones no se cumplen (modo debug).
+            FileNotFoundError: If ``config_path`` does not exist when attempting
+                to read it.
+            json.JSONDecodeError: If the JSON file is corrupted.
+            OSError: If the write/rename of the temporary file fails.
         """
         with config_path.open("r", encoding="utf-8") as json_file:
             payload = json.load(json_file)

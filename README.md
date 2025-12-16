@@ -133,4 +133,6 @@ It is intended for applications where:
 - Configuration changes must be persisted reliably and safely
 - Concurrent access must not corrupt configuration or produce inconsistent reads (See <attachments> above for file contents. You may not need to search or read the file again.)
 
-Simplicity and explicitness matter more than flexibility
+Simplicity and explicitness matter more than flexibility.
+
+staticconfiguration does not introduce global state; it introduces an environment-scoped, declarative, versioned configuration context outside the dependency graph.

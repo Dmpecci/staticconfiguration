@@ -1,14 +1,14 @@
 """
-Responsabilidad:
-    - Proveer utilidades base para manejar configuraciones estáticas definidas
-        mediante descriptors `Data` y persistidas mediante un backend JSON.
+Responsibility:
+    - Provide base utilities to manage static configurations defined via
+      Data descriptors and persisted using a JSON backend.
 
-Contratos:
-    - Se asume que las clases que hereden de `StaticConfigBase` declaran los
-        atributos de configuración como instancias de `Data` y definen
-        `__config_path__`, `__config_file__` y `__version__`.
-    - Ninguna función modifica recursos fuera de la ruta proporcionada por
-        `__config_path__` y `__config_file__`.
+Contracts:
+    - Classes that inherit from StaticConfigBase must declare configuration
+      attributes as Data instances and define __config_path__, __config_file__,
+      and __version__.
+    - No function modifies resources outside the path provided by
+      __config_path__ and __config_file__.
 """
 
 from __future__ import annotations
@@ -22,54 +22,53 @@ from ..json_backend.json_backend import JSONBackend
 
 class StaticConfigBase(StaticConfigInterface):
     """
-    Clase base para configuraciones estáticas con persistencia JSON.
+    Base class for static configurations with JSON persistence.
 
-    Responsabilidad:
-        - Proporcionar métodos `get` y `set` reutilizables para acceder y
-            modificar valores de configuración declarados como `Data` en las
-            subclases, delegando la persistencia al backend JSON.
+    Responsibility:
+        - Provide reusable get and set methods to access and modify configuration
+          values declared as Data in subclasses, delegating persistence to the
+          JSON backend.
 
-    Contratos:
-        Invariantes:
-            - Las subclases definen `__config_path__`, `__config_file__` y
-                `__version__` como atributos de clase.
-        Precondiciones:
-            - Los campos de configuración están declarados como instancias
-                de `Data` en la clase derivada.
-        Postcondiciones:
-            - `get` devuelve el valor almacenado o el `default` definido en
-                el `Data` correspondiente.
-            - `set` valida el tipo y persiste el nuevo valor usando el
-                `JSONBackend`.
+    Contracts:
+        Invariants:
+            - Subclasses define __config_path__, __config_file__, and __version__
+              as class attributes.
+        Preconditions:
+            - Configuration fields are declared as Data instances in the derived
+              class.
+        Postconditions:
+            - get returns the stored value or the default defined in the
+              corresponding Data.
+            - set validates the type and persists the new value using JSONBackend.
     """
     @classmethod
     def get(cls, data_name: str):
         """
-        Recuperar el valor de configuración asociado a `data_name`.
+        Retrieve the configuration value associated with data_name.
 
-        Responsabilidad:
-            - Localizar el descriptor `Data` correspondiente al nombre dado,
-              garantizar que el archivo de configuración existe e invocar el
-              backend para obtener el valor almacenado.
+        Responsibility:
+            - Locate the Data descriptor corresponding to the given name,
+              ensure the configuration file exists, and invoke the backend
+              to obtain the stored value.
 
-        Contratos:
-            Precondiciones:
-                - `data_name` debe corresponder a un atributo `Data` en la
-                  subclase (sensitivo a mayúsculas/minúsculas).
-            Postcondiciones:
-                - Devuelve el valor actual persistido o el valor por defecto
-                  definido en el `Data` si no existe aún en el archivo.
+        Contracts:
+            Preconditions:
+                - ``data_name`` must correspond to a Data attribute in the
+                  subclass (case-sensitive).
+            Postconditions:
+                - Returns the currently persisted value or the default value
+                  defined in the Data if it does not yet exist in the file.
 
         Args:
-            data_name (str): Nombre del campo de datos a recuperar.
+            data_name (str): Name of the data field to retrieve.
 
         Returns:
-            Any: Valor del campo decodificado según las reglas del `Data`.
+            Any: Field value decoded according to Data rules.
 
         Raises:
-            KeyError: Si `data_name` no está definido en la clase.
+            KeyError: If ``data_name`` is not defined in the class.
 
-        Ejemplo:
+        Example:
             >>> MyConfig.get('timeout')
             30
         """
@@ -79,7 +78,7 @@ class StaticConfigBase(StaticConfigInterface):
             raise KeyError(f"Data field {data_name!r} is not defined.")
 
         data = data_fields[data_name]
-        config_path = Path(expanduser(cls.__config_path__)) / cls.__config_file__
+        config_path = Path(cls.__config_path__).expanduser() / cls.__config_file__
 
         backend = JSONBackend()
         backend.ensure_initialized(config_path, cls.__version__, list(data_fields.values()))
@@ -89,35 +88,34 @@ class StaticConfigBase(StaticConfigInterface):
     @classmethod
     def set(cls, data_name: str, new_value: object):
         """
-        Asignar y persistir un nuevo valor para el campo especificado.
+        Assign and persist a new value for the specified field.
 
-        Responsabilidad:
-            - Validar el tipo del `new_value` según `data.data_type`, asegurar
-              la existencia del archivo de configuración y delegar la escritura
-              al backend JSON.
+        Responsibility:
+            - Validate the type of ``new_value`` according to ``data.data_type``,
+              ensure the configuration file exists, and delegate writing to the
+              JSON backend.
 
-        Contratos:
-            Precondiciones:
-                - `data_name` corresponde a un `Data` definido en la clase.
-                - `new_value` es una instancia compatible con
-                  `data.data_type`.
-            Postcondiciones:
-                - El nuevo valor queda persistido en el archivo de
-                  configuración y `last_modified` se actualiza.
+        Contracts:
+            Preconditions:
+                - ``data_name`` corresponds to a Data defined in the class.
+                - ``new_value`` is an instance compatible with ``data.data_type``.
+            Postconditions:
+                - The new value is persisted in the configuration file and
+                  ``last_modified`` is updated.
 
         Args:
-            data_name (str): Nombre del campo a modificar.
-            new_value (object): Valor nuevo que debe ser compatible con el
-                tipo declarado en el `Data` correspondiente.
+            data_name (str): Name of the field to modify.
+            new_value (object): New value that must be compatible with the type
+                declared in the corresponding Data.
 
         Returns:
-            None: Persiste el nuevo valor en disco.
+            None: Persists the new value to disk.
 
         Raises:
-            KeyError: Si `data_name` no está definido en la clase.
-            TypeError: Si `new_value` no es del tipo esperado.
+            KeyError: If ``data_name`` is not defined in the class.
+            TypeError: If ``new_value`` is not of the expected type.
 
-        Ejemplo:
+        Example:
             >>> MyConfig.set('timeout', 60)
         """
         data_fields = cls._get_data_fields()
@@ -139,27 +137,24 @@ class StaticConfigBase(StaticConfigInterface):
     @classmethod
     def _get_data_fields(cls) -> dict[str, Data]:
         """
-        Extraer los atributos `Data` definidos en la clase.
+        Extract Data attributes defined in the class.
 
-        Responsabilidad:
-            - Construir un diccionario con los nombres de atributo y las
-              instancias `Data` encontradas en la definición de la clase.
+        Responsibility:
+            - Build a dictionary with attribute names and Data instances found
+              in the class definition.
 
-        Contratos:
-            Precondiciones:
-                - Ejecutarse sobre la clase o una subclase que pueda contener
-                  atributos de tipo `Data`.
-            Postcondiciones:
-                - Devuelve un `dict` cuyos keys son los nombres de los campos
-                  y los values son las instancias `Data` correspondientes.
-
-        Args:
-            None
+        Contracts:
+            Preconditions:
+                - Execute on the class or a subclass that may contain Data
+                  attributes.
+            Postconditions:
+                - Returns a dict whose keys are field names and values are the
+                  corresponding Data instances.
 
         Returns:
-            dict[str, Data]: Mapeo de nombre de campo a descriptor `Data`.
+            dict[str, Data]: Mapping of field name to Data descriptor.
 
-        Ejemplo:
+        Example:
             >>> MyConfig._get_data_fields()
             {'timeout': Data(...), 'retries': Data(...)}
         """
