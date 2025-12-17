@@ -402,6 +402,8 @@ class JSONBackend:
             return True
 
         ttl_ms = int(self._lock_ttl_seconds * 1000)
+        if timestamp_ms > now_ms: # future timestamp, consider invalid
+            return True
         return now_ms - timestamp_ms >= ttl_ms
 
     def _is_locked(self, config_file: Path) -> bool:

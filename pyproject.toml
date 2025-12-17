@@ -3,15 +3,18 @@ name = "staticconfiguration"
 version = "0.1.0"
 description = "Herramienta para crear configuraciones globales, instancias estáticas"
 authors = [
-    {name = "David Muñoz Pecci"}
+    { name = "David Muñoz Pecci" }
 ]
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "pytest (>=9.0.2,<10.0.0)",
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2,<10.0.0",
+    "pytest-cov>=7.0.0,<8.0.0",
 ]
 
-
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
