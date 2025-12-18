@@ -7,15 +7,15 @@ StaticConfigBase API. Tests are designed to validate correct behavior,
 edge cases, and failure modes without modifying production code.
 
 Test Organization:
-    - TestJSONBackendEnsureInitialized: File creation and initialization (8 tests)
-    - TestJSONBackendReadValue: Reading and decoding configuration values (8 tests)
+    - TestJSONBackendEnsureInitialized: File creation and initialization (12 tests)
+    - TestJSONBackendReadValue: Reading and decoding configuration values (6 tests)
     - TestJSONBackendWriteValue: Writing and encoding configuration values (8 tests)
     - TestStaticConfigBaseGet: High-level configuration retrieval (5 tests)
     - TestStaticConfigBaseSet: High-level configuration updates (5 tests)
     - TestPersistenceEdgeCases: Complex scenarios and edge cases (11 tests)
 
 Test Results:
-    - ✅ 45/45 PASSED: All tests pass successfully (100% success rate)
+    - ✅ 47/47 PASSED: All tests pass successfully (100% success rate)
     
 Historical Note:
     Originally, 9 tests failed due to a critical bug in _get_data_fields() that only
@@ -209,6 +209,247 @@ class TestJSONBackendEnsureInitialized:
             data = json.load(f)
         
         assert data["data"]["optional_field"] is None
+        
+        remove_json(config_path)
+    
+    def test_does_not_modify_file_with_same_version(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Test that ensure_safe_state does NOT modify file when version matches.
+        
+        This tests the optimistic read fast-path: when the file exists and its
+        version matches the requested version, ensure_safe_state should return
+        immediately without acquiring a lock or modifying the file.
+        
+        Critical behavior: No lock acquisition, no migration, no timestamp change.
+        """
+        config_path = temp_config_dir / "config.json"
+        version = "1.0.0"
+        
+        # Create initial file
+        original_timestamp = "2023-01-01T00:00:00Z"
+        original_payload = {
+            "version": version,
+            "created": original_timestamp,
+            "last_modified": original_timestamp,
+            "data": {
+                "api_url": "https://original.com",
+                "max_retries": 5,
+                "enable_feature": True,
+            }
+        }
+        
+        with config_path.open("w") as f:
+            json.dump(original_payload, f, indent=2)
+        
+        # Call ensure_safe_state with same version
+        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
+        
+        # Read file and verify it was NOT modified
+        with config_path.open("r") as f:
+            data = json.load(f)
+        
+        # All timestamps and values should be unchanged
+        assert data["version"] == version
+        assert data["created"] == original_timestamp
+        assert data["last_modified"] == original_timestamp
+        assert data["data"]["api_url"] == "https://original.com"
+        assert data["data"]["max_retries"] == 5
+        assert data["data"]["enable_feature"] is True
+        
+        remove_json(config_path)
+    
+    def test_forces_migration_in_development_mode(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Test that development=True forces migration even when version matches.
+        
+        In development mode, ensure_safe_state should always call migrate_payload()
+        even if the file version matches the requested version. This ensures
+        schema changes (like adding new fields) are applied during development.
+        
+        Critical behavior: Lock acquired, ConfigPayloadMigrator called.
+        Note: Migration preserves existing values, only adds missing fields with defaults.
+        """
+        config_path = temp_config_dir / "config.json"
+        version = "1.0.0"
+        
+        # Create file with same version but missing a field from current schema
+        original_created = "2023-01-01T00:00:00Z"
+        original_last_modified = "2023-01-01T00:00:00Z"
+        original_payload = {
+            "version": version,
+            "created": original_created,
+            "last_modified": original_last_modified,
+            "data": {
+                "api_url": "old_url",
+                "max_retries": 999,
+                # Missing "enable_feature" field
+            }
+        }
+        
+        with config_path.open("w") as f:
+            json.dump(original_payload, f)
+        
+        # Call with development=True
+        before_call = datetime.now(timezone.utc)
+        backend.ensure_safe_state(config_path, version, sample_data_fields, development=True)
+        after_call = datetime.now(timezone.utc)
+        
+        # Read file and verify migration occurred
+        with config_path.open("r") as f:
+            data = json.load(f)
+        
+        # Version should remain the same
+        assert data["version"] == version
+        
+        # Created timestamp should be preserved
+        assert data["created"] == original_created
+        
+        # last_modified should be updated (migration happened)
+        last_modified = datetime.fromisoformat(data["last_modified"].replace("Z", "+00:00"))
+        assert before_call.replace(microsecond=0) <= last_modified <= after_call.replace(microsecond=0) + timedelta(seconds=1)
+        
+        # Existing values should be preserved (migration doesn't overwrite)
+        assert data["data"]["api_url"] == "old_url"
+        assert data["data"]["max_retries"] == 999
+        
+        # Missing field should be added with default value
+        assert data["data"]["enable_feature"] is False
+        
+        remove_json(config_path)
+    
+    def test_migrates_when_version_mismatch(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Test that ensure_safe_state triggers migration when file version differs.
+        
+        When the existing file has a different version than requested,
+        ensure_safe_state should acquire lock and call migrate_payload().
+        
+        Critical behavior: Version mismatch triggers migration under lock.
+        """
+        config_path = temp_config_dir / "config.json"
+        old_version = "0.9.0"
+        new_version = "1.0.0"
+        
+        # Create file with old version
+        original_created = "2023-01-01T00:00:00Z"
+        old_payload = {
+            "version": old_version,
+            "created": original_created,
+            "last_modified": "2023-01-01T00:00:00Z",
+            "data": {
+                "api_url": "old_schema_url",
+            }
+        }
+        
+        with config_path.open("w") as f:
+            json.dump(old_payload, f)
+        
+        # Call with new version
+        backend.ensure_safe_state(config_path, new_version, sample_data_fields, development=False)
+        
+        # Read file and verify migration occurred
+        with config_path.open("r") as f:
+            data = json.load(f)
+        
+        # Version should be updated
+        assert data["version"] == new_version
+        
+        # Created timestamp should be preserved
+        assert data["created"] == original_created
+        
+        # Data should conform to new schema (migration applied)
+        assert "api_url" in data["data"]
+        assert "max_retries" in data["data"]
+        assert "enable_feature" in data["data"]
+        
+        remove_json(config_path)
+    
+    def test_recreates_file_with_missing_required_keys(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Test that ensure_safe_state recreates file when required keys are missing.
+        
+        The is_operable_payload() validation checks for version, created, 
+        last_modified, and data keys. If any are missing, the file should be
+        treated as corrupted and recreated with defaults.
+        
+        Critical behavior: Missing keys trigger force_migration=True.
+        """
+        config_path = temp_config_dir / "config.json"
+        version = "1.0.0"
+        
+        # Test 1: Missing "data" key
+        invalid_payload = {
+            "version": version,
+            "created": "2023-01-01T00:00:00Z",
+            "last_modified": "2023-01-01T00:00:00Z",
+            # Missing "data" key
+        }
+        
+        with config_path.open("w") as f:
+            json.dump(invalid_payload, f)
+        
+        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
+        
+        with config_path.open("r") as f:
+            data = json.load(f)
+        
+        # File should be recreated with proper structure
+        assert "data" in data
+        assert data["data"]["api_url"] == "https://api.example.com"
+        assert data["data"]["max_retries"] == 3
+        
+        remove_json(config_path)
+        
+        # Test 2: Missing "version" key
+        invalid_payload = {
+            # Missing "version" key
+            "created": "2023-01-01T00:00:00Z",
+            "last_modified": "2023-01-01T00:00:00Z",
+            "data": {"api_url": "test"}
+        }
+        
+        with config_path.open("w") as f:
+            json.dump(invalid_payload, f)
+        
+        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
+        
+        with config_path.open("r") as f:
+            data = json.load(f)
+        
+        assert "version" in data
+        assert data["version"] == version
+        
+        remove_json(config_path)
+    
+    def test_recovers_from_corrupted_json(self, backend, temp_config_dir, sample_data_fields):
+        """
+        Test that ensure_safe_state recovers from corrupted JSON files.
+        
+        When the JSON file cannot be parsed (JSONDecodeError or OSError),
+        ensure_safe_state should acquire lock and recreate the file with
+        default values.
+        
+        Critical behavior: Corrupted JSON triggers file recreation under lock.
+        """
+        config_path = temp_config_dir / "config.json"
+        version = "1.0.0"
+        
+        # Write malformed JSON
+        with config_path.open("w") as f:
+            f.write("{invalid json content: broken")
+        
+        # Should not raise exception, should recover
+        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
+        
+        # Verify file was recreated with valid JSON
+        with config_path.open("r") as f:
+            data = json.load(f)  # Should not raise
+        
+        assert data["version"] == version
+        assert "created" in data
+        assert "last_modified" in data
+        assert "data" in data
+        assert data["data"]["api_url"] == "https://api.example.com"
         
         remove_json(config_path)
 

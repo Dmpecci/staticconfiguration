@@ -769,11 +769,15 @@ class TestEdgeCases:
     
     def test_no_deadlock_with_process_termination(self, backend, temp_config_dir, sample_data_fields):
         """
-        Test that abrupt process termination during write doesn't deadlock system.
+        Test that abrupt process termination during write doesn't permanently deadlock system.
         
-        WARNING: This test may leave orphaned locks if process is killed after
-        acquiring lock but before finally block. This is a known limitation
-        of the current implementation (no TTL or automatic recovery).
+        The implementation has TTL (10 seconds) for automatic stale lock recovery.
+        If a process is killed after acquiring lock but before finally block,
+        the orphaned lock will be automatically removed by the first subsequent
+        operation (read or write) after TTL expires.
+        
+        This test documents that orphaned locks exist temporarily but are
+        auto-recovered by the TTL mechanism in _wait_until_unlocked().
         """
         config_path = temp_config_dir / "config.json"
         initialize_config(config_path, sample_data_fields)
@@ -796,14 +800,13 @@ class TestEdgeCases:
             p.terminate()
             p.join(timeout=2)
             
-            # WARNING: Lock may remain as orphan - this is expected behavior
-            # Current implementation has no TTL or recovery mechanism
+            # Orphaned lock will exist immediately after termination
             lock_exists = check_lock_exists(config_path)
             
             if lock_exists:
-                print("WARNING: Orphaned lock detected (expected with current implementation)")
-                # System will deadlock until manual cleanup
-                # This documents the limitation, not a test failure
+                # This is expected - TTL hasn't expired yet
+                # Lock will be auto-removed after 10 seconds by any operation
+                pass
         finally:
             if p.is_alive():
                 p.kill()

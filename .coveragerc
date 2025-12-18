@@ -1,0 +1,19 @@
+[run]
+branch = True
+source =
+    staticconfiguration
+
+omit =
+    */tests/*
+    */__init__.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    if typing.TYPE_CHECKING:
+    raise NotImplementedError
+    pass
+
+show_missing = True
+skip_empty = True
