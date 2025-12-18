@@ -78,7 +78,7 @@ class StaticConfigBase(StaticConfigInterface):
         config_path = Path(cls.__config_path__).expanduser() / cls.__config_file__
 
         backend = JSONBackend()
-        backend.ensure_initialized(config_path, cls.__version__, list(data_fields.values()))
+        backend.ensure_safe_state(config_path, cls.__version__, list(data_fields.values()), cls.__development__)
 
         return backend.read_value(data, config_path)
     
@@ -126,7 +126,7 @@ class StaticConfigBase(StaticConfigInterface):
         config_path = Path(cls.__config_path__).expanduser() / cls.__config_file__
 
         backend = JSONBackend()
-        backend.ensure_initialized(config_path, cls.__version__, list(data_fields.values()))
+        backend.ensure_safe_state(config_path, cls.__version__, list(data_fields.values()), cls.__development__)
         backend.write_value(data, new_value, config_path)
 
     @classmethod

@@ -92,8 +92,7 @@ def sample_data_fields():
 def initialize_config(config_path: Path, data_fields: list):
     """Helper to initialize a config file for concurrent tests."""
     backend = JSONBackend()
-    backend.ensure_initialized(config_path, "1.0.0", data_fields)
-
+    backend.ensure_safe_state(config_path, "1.0.0", data_fields, development=False)
 
 def write_with_delay(config_path: Path, data_name: str, value, delay: float = 0):
     """

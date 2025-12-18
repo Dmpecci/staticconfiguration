@@ -86,14 +86,14 @@ class TestConfig:
 # ============================================================================
 
 class TestJSONBackendEnsureInitialized:
-    """Test suite for JSONBackend.ensure_initialized method."""
+    """Test suite for JSONBackend.ensure_safe_state method."""
     
     def test_creates_file_with_correct_structure(self, backend, temp_config_dir, sample_data_fields):
-        """Test that ensure_initialized creates a JSON file with required structure."""
+        """Test that ensure_safe_state creates a JSON file with required structure."""
         config_path = temp_config_dir / "config.json"
         version = "1.0.0"
         
-        backend.ensure_initialized(config_path, version, sample_data_fields)
+        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
         
         assert config_path.exists()
         
@@ -112,7 +112,7 @@ class TestJSONBackendEnsureInitialized:
         """Test that default values are correctly written during initialization."""
         config_path = temp_config_dir / "config.json"
         
-        backend.ensure_initialized(config_path, "1.0.0", sample_data_fields)
+        backend.ensure_safe_state(config_path, "1.0.0", sample_data_fields, development=False)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -123,43 +123,13 @@ class TestJSONBackendEnsureInitialized:
         
         remove_json(config_path)
     
-    def test_does_not_overwrite_existing_file(self, backend, temp_config_dir, sample_data_fields):
-        """Test that ensure_initialized does not modify existing configuration files."""
-        config_path = temp_config_dir / "config.json"
-        
-        # Create initial file
-        backend.ensure_initialized(config_path, "1.0.0", sample_data_fields)
-        
-        # Modify the file
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        data["data"]["max_retries"] = 99
-        data["custom_field"] = "custom_value"
-        
-        with config_path.open("w") as f:
-            json.dump(data, f)
-        
-        # Call ensure_initialized again
-        backend.ensure_initialized(config_path, "2.0.0", sample_data_fields)
-        
-        # Verify file was not overwritten
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        assert data["data"]["max_retries"] == 99
-        assert data["custom_field"] == "custom_value"
-        assert data["version"] == "1.0.0"  # Not updated
-        
-        remove_json(config_path)
-    
     def test_creates_intermediate_directories(self, backend, temp_config_dir, sample_data_fields):
-        """Test that ensure_initialized creates missing parent directories."""
+        """Test that ensure_safe_state creates missing parent directories."""
         config_path = temp_config_dir / "nested" / "deep" / "config.json"
         
         assert not config_path.parent.exists()
         
-        backend.ensure_initialized(config_path, "1.0.0", sample_data_fields)
+        backend.ensure_safe_state(config_path, "1.0.0", sample_data_fields, development=False)
         
         assert config_path.exists()
         assert config_path.parent.exists()
@@ -171,7 +141,7 @@ class TestJSONBackendEnsureInitialized:
         config_path = temp_config_dir / "config.json"
         
         before = datetime.now(timezone.utc)
-        backend.ensure_initialized(config_path, "1.0.0", sample_data_fields)
+        backend.ensure_safe_state(config_path, "1.0.0", sample_data_fields, development=False)
         after = datetime.now(timezone.utc)
         
         with config_path.open("r") as f:
@@ -201,7 +171,7 @@ class TestJSONBackendEnsureInitialized:
         ]
         
         config_path = temp_config_dir / "config.json"
-        backend.ensure_initialized(config_path, "1.0.0", data_fields)
+        backend.ensure_safe_state(config_path, "1.0.0", data_fields, development=False)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -215,7 +185,7 @@ class TestJSONBackendEnsureInitialized:
         """Test initialization with no data fields."""
         config_path = temp_config_dir / "config.json"
         
-        backend.ensure_initialized(config_path, "1.0.0", [])
+        backend.ensure_safe_state(config_path, "1.0.0", [], development=False)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -233,7 +203,7 @@ class TestJSONBackendEnsureInitialized:
         ]
         
         config_path = temp_config_dir / "config.json"
-        backend.ensure_initialized(config_path, "1.0.0", data_fields)
+        backend.ensure_safe_state(config_path, "1.0.0", data_fields, development=False)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -269,27 +239,6 @@ class TestJSONBackendReadValue:
         result = backend.read_value(data_field, config_path)
         
         assert result == "https://api.example.com"
-        
-        remove_json(config_path)
-    
-    def test_returns_default_when_key_missing(self, backend, temp_config_dir):
-        """Test that default value is returned when key doesn't exist in file."""
-        config_path = temp_config_dir / "config.json"
-        data_field = Data(name="missing_key", data_type=str, default="default_value")
-        
-        payload = {
-            "version": "1.0.0",
-            "created": "2023-01-01T00:00:00Z",
-            "last_modified": "2023-01-01T00:00:00Z",
-            "data": {}
-        }
-        
-        with config_path.open("w") as f:
-            json.dump(payload, f)
-        
-        result = backend.read_value(data_field, config_path)
-        
-        assert result == "default_value"
         
         remove_json(config_path)
     
@@ -381,33 +330,6 @@ class TestJSONBackendReadValue:
             backend.read_value(data_field, config_path)
         
         remove_json(config_path)
-    
-    def test_decoder_with_none_default(self, backend, temp_config_dir):
-        """Test decoder behavior when default is None."""
-        def custom_decoder(value):
-            if value is None:
-                return None
-            return value.upper()
-        
-        config_path = temp_config_dir / "config.json"
-        data_field = Data(name="field", data_type=str, default=None, decoder=custom_decoder)
-        
-        payload = {
-            "version": "1.0.0",
-            "created": "2023-01-01T00:00:00Z",
-            "last_modified": "2023-01-01T00:00:00Z",
-            "data": {}
-        }
-        
-        with config_path.open("w") as f:
-            json.dump(payload, f)
-        
-        result = backend.read_value(data_field, config_path)
-        
-        assert result is None
-        
-        remove_json(config_path)
-
 
 # ============================================================================
 # TestJSONBackendWriteValue
@@ -787,7 +709,7 @@ class TestPersistenceEdgeCases:
             decoder=dict_decoder
         )
         
-        backend.ensure_initialized(config_path, "1.0.0", [data_field])
+        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
         
         test_value = {"nested": {"key": "value"}, "list": [1, 2, 3]}
         backend.write_value(data_field, test_value, config_path)
@@ -803,7 +725,7 @@ class TestPersistenceEdgeCases:
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="counter", data_type=int, default=0)
         
-        backend.ensure_initialized(config_path, "1.0.0", [data_field])
+        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
         
         # Simulate multiple rapid writes
         for i in range(10):
@@ -819,7 +741,7 @@ class TestPersistenceEdgeCases:
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="text", data_type=str, default="default")
         
-        backend.ensure_initialized(config_path, "1.0.0", [data_field])
+        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
         backend.write_value(data_field, "", config_path)
         
         result = backend.read_value(data_field, config_path)
@@ -832,7 +754,7 @@ class TestPersistenceEdgeCases:
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="enabled", data_type=bool, default=True)
         
-        backend.ensure_initialized(config_path, "1.0.0", [data_field])
+        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
         backend.write_value(data_field, False, config_path)
         
         result = backend.read_value(data_field, config_path)
@@ -846,7 +768,7 @@ class TestPersistenceEdgeCases:
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="count", data_type=int, default=10)
         
-        backend.ensure_initialized(config_path, "1.0.0", [data_field])
+        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
         backend.write_value(data_field, 0, config_path)
         
         result = backend.read_value(data_field, config_path)
@@ -925,7 +847,7 @@ class TestPersistenceEdgeCases:
             }
         }
         
-        backend.ensure_initialized(config_path, "1.0.0", [data_field])
+        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
         backend.write_value(data_field, large_structure, config_path)
         result = backend.read_value(data_field, config_path)
         
@@ -941,7 +863,7 @@ class TestPersistenceEdgeCases:
         
         unicode_text = "Hello 世界 🌍 Привет مرحبا"
         
-        backend.ensure_initialized(config_path, "1.0.0", [data_field])
+        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
         backend.write_value(data_field, unicode_text, config_path)
         result = backend.read_value(data_field, config_path)
         
@@ -954,7 +876,7 @@ class TestPersistenceEdgeCases:
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="setting", data_type=str, default="default")
         
-        backend.ensure_initialized(config_path, "1.0.0", [data_field])
+        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
         
         # Manually modify the JSON file
         with config_path.open("r") as f:
