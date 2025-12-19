@@ -18,6 +18,9 @@ from pathlib import Path
 import time
 from staticconfiguration.entities import Data
 from staticconfiguration.json_backend.config_payload_migrator import ConfigPayloadMigrator
+import warnings
+import os
+from staticconfiguration.exceptions.configuration_reset_warning import ConfigurationResetWarning
 
 class JSONBackend:
     """
@@ -40,34 +43,144 @@ class JSONBackend:
               ``version``, ``created``, ``last_modified``, and ``data`` and 
                is structurally operable when preconditions are met.
     """
-    _sleep_interval: float = 0.05
-    _lock_ttl_seconds: float = 10.0
+    _SLEEP_INTERVAL: float = 0.05
+    _LOCK_TTL_SECONDS: float = 10.0
 
-    def ensure_safe_state(self, config_path: Path, version: str, data_fields: list[Data], development: bool) -> None:
+    @staticmethod
+    def read_value(data: Data, config_path: Path, version: str, data_fields: list[Data], development: bool, concurrency_unsafe: bool) -> object | None:
+        """
+        Read and decode the value of a configuration key from JSON.
+
+        Responsibility:
+            - Retrieve the stored value for the provided Data from the JSON file
+              and return it in its domain representation (applying ``Data.decoder``
+              if available or performing conversion via ``data.data_type``).
+              Always under lock to ensure exclusive access.
+
+        Contracts:
+            Preconditions:
+                - ``data`` is a valid Data instance with a defined ``name``
+                  attribute.
+            Postconditions:
+                - Returns ``None`` if ``data`` is ``None``.
+                - If ``data.decoder`` is present, the output is the result of
+                  ``data.decoder(raw_value)``.
+
+        Args:
+            data (Data): Descriptor of the field whose key is to be read.
+            config_path (Path): Path to the JSON configuration file.
+            version (str): Configuration schema version to store.
+            data_fields (list[Data]): List of Data descriptors for fields to
+                initialize with their default values.
+            development (bool): If True, forces migration even if versions match.
+
+        Returns:
+            object | None: Decoded value corresponding to the ``data`` field,
+                or ``None`` if the stored value is JSON null.
+        Raises:
+            KeyError: If the key described by ``data.name`` does not exist in the JSON file.
+        """
+        if not concurrency_unsafe:
+            JSONBackend._acquire_lock(config_path)
+        try:
+            payload = JSONBackend._ensure_safe_state(config_path, version, data_fields, development)
+            if data.name in payload["data"]:
+                raw_value = payload["data"][data.name]
+            else:
+                raise KeyError(f"Key '{data.name}' not found in configuration file.")
+
+            if raw_value is None:
+                return None
+            if data.decoder:
+                return data.decoder(raw_value)
+        finally:
+            if not concurrency_unsafe:
+                JSONBackend._release_lock(config_path)
+        return data.data_type(raw_value)
+
+    @staticmethod
+    def write_value(data: Data, new_value, config_path: Path, version: str, data_fields: list[Data], development: bool, concurrency_unsafe: bool) -> None:
+        """
+        Write or update the value of a field in the JSON configuration file.
+
+        Responsibility:
+            - Persist ``new_value`` for the key described by ``data``, updating
+              the ``last_modified`` timestamp and applying ``Data.encoder`` if
+              present. Always under lock to ensure exclusive access.
+
+        Contracts:
+            Preconditions:
+                - ``data`` is a valid Data instance and ``new_value`` is a value
+                  that can be serialized directly or via ``Data.encoder``.
+                - ``data_fields`` is a valid list of Data from the configuration schema.
+            Postconditions:
+                - The JSON file will contain the updated value in
+                  ``payload['data'][data.name]`` (possibly encoded).
+                - ``payload['last_modified']`` will reflect the write time in
+                  ISO 8601 UTC format without microseconds.
+
+        Args:
+            data (Data): Descriptor of the field to update.
+            new_value (Any): New value to store for the field.
+            config_path (Path): Path to the JSON configuration file.
+            version (str): Configuration schema version to store.
+            data_fields (list[Data]): List of Data descriptors for fields to
+                initialize with their default values.
+            development (bool): If True, forces migration even if versions match.
+
+        Returns:
+            None: Does not return a value; persists the new state to disk.
+
+        Raises:
+            KeyError: If the key described by ``data.name`` does not exist in the JSON file.
+        """
+        if not concurrency_unsafe:
+            JSONBackend._acquire_lock(config_path)
+        
+        try:
+            payload = JSONBackend._ensure_safe_state(config_path, version, data_fields, development)
+            
+            if data.name not in payload["data"]:
+                raise KeyError(f"Key '{data.name}' not found in configuration file.")
+
+            encoded_value = data.encoder(new_value) if (data.encoder and new_value is not None) else new_value
+            payload["data"][data.name] = encoded_value
+
+            timestamp = (
+                datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            payload["last_modified"] = timestamp
+
+            JSONBackend._write_payload(payload, config_path)
+        finally:
+            if not concurrency_unsafe:
+                JSONBackend._release_lock(config_path)
+
+    @staticmethod
+    def _ensure_safe_state(config_path: Path, version: str, data_fields: list[Data], development: bool) -> dict:
         """
         Ensure existence and integrity of the JSON configuration file, and check for
         required migrations if needed.
 
         Responsibility:
-            - Read the JSON configuration optimistically without acquiring a lock.
             - Create a new JSON configuration file from defaults when the file
-              is missing or its content is not parseable as JSON.
-            - Detect schema version changes and run a deterministic migration
-              under exclusive lock when required.
+              is missing.
+            - Detect schema version changes and invoke migration if necessary.
             - If the file exists but is corrupted (not parseable as JSON), it is
                 recreated with default values for all fields defined in
                 ``data_fields``.
-            - If the file exists and parses but its version differs from the
-                requested ``version``, or development mode is enabled, it is migrated under exclusive lock.
-
+            - After checking or performing migration, return the current payload.
         Contracts:
             Preconditions:
                 - ``config_path`` is a valid pathlib.Path, may or may not exist.
-                - ``version`` is not an empty string.
                 - ``data_fields`` is a list of all the Data instances obtained from the
                   configuration schema.
+                - This method is called under lock to ensure exclusive access.
             Postconditions:
-                - On success, leaves the file in a valid JSON state with the expected keys.
+                - Always leaves the file in a valid JSON state with the expected keys.
 
         Args:
             config_path (Path): Path to the JSON configuration file.
@@ -112,19 +225,6 @@ class JSONBackend:
                 "data": data_content,
             }
 
-        def write_payload(payload: dict) -> None: 
-            """
-            Writes the given payload dictionary to the JSON configuration file atomically.
-            Doesn't acquire any lock, the caller must ensure exclusive access.
-            Args:
-                payload (dict): Payload dictionary to write to the JSON file.
-            """
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = config_path.with_suffix(".tmp")
-            with tmp_path.open("w", encoding="utf-8") as json_file:
-                json.dump(payload, json_file, indent=2)
-            tmp_path.replace(config_path)
-
         def read_payload() -> dict:
             """
             Reads and returns the payload dictionary from the JSON configuration file.
@@ -135,27 +235,10 @@ class JSONBackend:
             with config_path.open("r", encoding="utf-8") as json_file:
                 return json.load(json_file)
         
-        def migrate_payload(force_migration: bool = False) -> None:
-            """
-            Checks the version and development flag of the existing payload and migrates it if necessary.
-            Always acquires the lock before performing operations.
-            """
-            self.acquire_lock(config_path)
-            try:
-                payload = read_payload()
-                if (not development and payload.get("version") == version) and not force_migration: 
-                    # Yeah, I know, another check.
-                    # Same condition, different context: re-evaluated under lock,
-                    # with an explicit escape hatch for rare edge cases.
-                    # The common fast-path stays untouched.
-                    return
-                migrated_payload = ConfigPayloadMigrator.migrate_payload(payload, version, data_fields)
-                write_payload(migrated_payload)
-            except (json.JSONDecodeError, OSError): # json definitely corrupted, rewrite defaults
-                #raise Exception("Configuration file is corrupted; rewriting with default values.")
-                write_payload(build_default_payload())
-            finally:
-                self.release_lock(config_path)       
+        def migrate_payload(payload) -> dict:
+            migrated_payload = ConfigPayloadMigrator.migrate_payload(payload, version, data_fields)
+            JSONBackend._write_payload(migrated_payload, config_path)
+            return migrated_payload
 
         def is_operable_payload(payload: object) -> bool:
             """
@@ -183,173 +266,72 @@ class JSONBackend:
                 return False
 
             return True
-
-        # Check .json existence
-        if not config_path.exists(): 
-            self.acquire_lock(config_path)
-            try:
-                if not config_path.exists(): # recheck after acquiring lock
-                    write_payload(build_default_payload())
+        
+        payload = None
+        try:
+            if not config_path.exists():
+                JSONBackend._write_payload(build_default_payload(), config_path)
                 return
-            finally:
-                self.release_lock(config_path)
-
-        if development: # Development mode always migrates
-            migrate_payload()
-            return
-        # Check version and migrate if needed
-        try: # optimistic read without lock
             payload = read_payload()
             if not is_operable_payload(payload): 
-                migrate_payload(force_migration=True)
+                payload = migrate_payload(payload)
                 return
             file_version = payload.get("version")
-            if file_version != version:
-                migrate_payload()
+            if file_version != version or development:
+                payload = migrate_payload(payload)
             return
-        except (json.JSONDecodeError, OSError): # .json may be corrupted, try with lock. Shouldn't be corrupted, 
-            migrate_payload()                   # we write atomically with replace(), but better safe than sorry
-            return
-        
-    def read_value(self, data: Data, config_path: Path):
-        """
-        Read and decode the value of a configuration key from JSON.
-
-        Responsibility:
-            - Retrieve the stored value for the provided Data from the JSON file
-              and return it in its domain representation (applying ``Data.decoder``
-              if available or performing conversion via ``data.data_type``).
-
-        Contracts:
-            Preconditions:
-                - ``config_path`` exists and is readable.
-                - ``data`` is a valid Data instance with a defined ``name``
-                  attribute.
-            Postconditions:
-                - Returns ``None`` if ``data`` is ``None``.
-                - If ``data.decoder`` is present, the output is the result of
-                  ``data.decoder(raw_value)``.
-
-        Args:
-            data (Data): Descriptor of the field whose key is to be read.
-            config_path (Path): Path to the JSON configuration file.
-
-        Returns:
-            object | None: Decoded value corresponding to the ``data`` field,
-                or ``None`` if the stored value is JSON null.
-        Raises:
-            KeyError: If the key described by ``data.name`` does not exist in the JSON file.
-        """
-        self._wait_until_unlocked(config_path)
-        with config_path.open("r", encoding="utf-8") as json_file:
-            payload = json.load(json_file)
-
-        if data.name in payload["data"]:
-            raw_value = payload["data"][data.name]
-        else:
-            raise KeyError(f"Key '{data.name}' not found in configuration file.")
-
-        if raw_value is None:
-            return None
-        if data.decoder:
-            return data.decoder(raw_value)
-
-        return data.data_type(raw_value)
-
-    def write_value(self, data: Data, new_value, config_path: Path):
-        """
-        Write or update the value of a field in the JSON configuration file.
-
-        Responsibility:
-            - Persist ``new_value`` for the key described by ``data``, updating
-              the ``last_modified`` timestamp and applying ``Data.encoder`` if
-              present.
-
-        Contracts:
-            Preconditions:
-                - ``config_path`` exists and is writable (or the process can
-                  create/rewrite the file temporarily in the same location).
-                - ``data`` is a valid Data instance and ``new_value`` is a value
-                  that can be serialized directly or via ``Data.encoder``.
-            Postconditions:
-                - The JSON file will contain the updated value in
-                  ``payload['data'][data.name]`` (possibly encoded).
-                - ``payload['last_modified']`` will reflect the write time in
-                  ISO 8601 UTC format without microseconds.
-
-        Args:
-            data (Data): Descriptor of the field to update.
-            new_value (Any): New value to store for the field.
-            config_path (Path): Path to the JSON configuration file.
-
-        Returns:
-            None: Does not return a value; persists the new state to disk.
-
-        Raises:
-            KeyError: If the key described by ``data.name`` does not exist in the JSON file.
-        """
-        self.acquire_lock(config_path)
-        try:
-            with config_path.open("r", encoding="utf-8") as json_file:
-                payload = json.load(json_file)
-            
-            if data.name not in payload["data"]:
-                raise KeyError(f"Key '{data.name}' not found in configuration file.")
-
-            encoded_value = data.encoder(new_value) if (data.encoder and new_value is not None) else new_value
-            payload["data"][data.name] = encoded_value
-
-            timestamp = (
-                datetime.now(timezone.utc)
-                .replace(microsecond=0)
-                .isoformat()
-                .replace("+00:00", "Z")
+        except (json.JSONDecodeError, OSError): # .json corrupted, restore defaults
+            JSONBackend._write_payload(build_default_payload(), config_path)
+            payload = None
+            warnings.warn(
+                "Configuration file was corrupted and has been reset to defaults.",
+                ConfigurationResetWarning,
+                stacklevel=2,
             )
-            payload["last_modified"] = timestamp
-
-            tmp_path = config_path.with_suffix(".tmp")
-
-            with tmp_path.open("w", encoding="utf-8") as json_file:
-                json.dump(payload, json_file, indent=2)
-
-            tmp_path.replace(config_path)
         finally:
-            self.release_lock(config_path)
+            if payload is None:
+                payload = read_payload()
+            return payload
 
-    def _wait_until_unlocked(self, config_file: Path) -> None:
+    @staticmethod   
+    def _write_payload(payload: dict, config_path: Path) -> None: 
         """
-        Block execution until the lock file for ``config_file`` disappears,
-        cleaning stale locks when necessary.
+        Write the payload dictionary to the JSON configuration file atomically.
 
         Responsibility:
-            - Poll the lock associated with ``config_file`` until no writer holds
-              it, allowing safe read access.
+            - Persist the provided payload to disk in an atomic manner by
+              writing to a temporary file and replacing the target file.
+            - Ensure target directory exists before attempting to write.
 
         Contracts:
             Preconditions:
-                - ``config_file`` is the JSON configuration path to observe.
+                - ``payload`` is JSON-serializable (contains only serializable types).
+                - ``config_path`` is a pathlib.Path pointing to the desired file location.
+                - Caller holds exclusive access (this method does not acquire locks).
             Postconditions:
-                - Returns only when the corresponding ``.lock`` file is absent.
+                - The file at ``config_path`` exists and contains the JSON
+                  representation of ``payload`` if no exception is raised.
+                - The write is performed atomically using a temporary file and
+                  an atomic replace/rename operation.
 
         Args:
-            config_file (Path): JSON configuration file to monitor.
+            payload (dict): Payload dictionary to write to the JSON file.
+            config_path (Path): Path to the JSON configuration file.
+
+        Returns:
+            None: This method does not return a value.
+
+        Example:
+            >>> JSONBackend._write_payload({"version": "1.0", "data": {}}, Path("/tmp/config.json"))
         """
-        while self._is_locked(config_file):
-            now_ms = int(time.time() * 1000)
-            if self._is_lock_stale(config_file, now_ms):
-                try:
-                    # To me from the future (or anyone else):
-                    # This is intentionally not release_lock().
-                    # Stale-lock cleanup is racy by nature; release_lock enforces writer invariants,
-                    # and this path will look like a catastrophic failure; we don't want unnecessary heart attacks.
-                    self._lock_path(config_file).unlink() 
-                except FileNotFoundError:
-                    pass
-                continue
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = config_path.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as json_file:
+            json.dump(payload, json_file, indent=2)
+        tmp_path.replace(config_path)
 
-            time.sleep(self._sleep_interval)
-
-    def acquire_lock(self, config_file: Path) -> None:
+    @staticmethod
+    def _acquire_lock(config_file: Path) -> None:
         """
         Acquire exclusive access to ``config_file`` by creating its lock.
 
@@ -366,15 +348,31 @@ class JSONBackend:
         Args:
             config_file (Path): JSON configuration file to lock for writing.
         """
-        config_file.parent.mkdir(parents=True, exist_ok=True)
-        self._wait_until_unlocked(config_file)
+        lock_path = config_file.with_suffix(config_file.suffix + ".lock")
+        pid = os.getpid()
+        now = time.monotonic()
+
+        payload = f"{pid}:{now}"
 
         while True:
-            if self._try_create_lock(config_file):
-                return
-            time.sleep(self._sleep_interval)
+            try:
+                fd = os.open(
+                    lock_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                )
+                with os.fdopen(fd, "w") as f:
+                    f.write(payload)
+                return  # lock adquirido
 
-    def release_lock(self, config_file: Path) -> None:
+            except FileExistsError:
+                if JSONBackend._is_lock_stale(lock_path):
+                    if JSONBackend._break_stale_lock(lock_path):
+                        continue
+
+                time.sleep(JSONBackend._SLEEP_INTERVAL)
+
+    @staticmethod
+    def _release_lock(config_file: Path) -> None:
         """
         Release the lock associated with ``config_file``.
 
@@ -391,154 +389,138 @@ class JSONBackend:
         Args:
             config_file (Path): JSON configuration file whose lock is released.
         """
+        lock_path = config_file.with_suffix(config_file.suffix + ".lock")
+        pid = os.getpid()
+
         try:
-            self._lock_path(config_file).unlink()
+            content = lock_path.read_text()
+            owner_pid = int(content.split(":")[0])
         except FileNotFoundError:
-            # If this fails, fail completely and loudly.
-            # It means some process has written without holding the lock,
-            # or the lock was deleted externally.
-            raise RuntimeError("Attempted to release a lock that is not held. Concurrency may be unstable.")
+            return
+        except Exception:
+            # lock corrupto, no tocar
+            return
 
-    def _lock_path(self, config_file: Path) -> Path:
-        """
-        Compute the lock file path for ``config_file``.
-
-        Responsibility:
-            - Derive the companion ``.lock`` file path colocated with the JSON
-              configuration file.
-
-        Contracts:
-            Preconditions:
-                - ``config_file`` is a Path pointing to the JSON file.
-            Postconditions:
-                - Returns a Path ending with ``.lock`` in the same directory.
-
-        Args:
-            config_file (Path): JSON configuration file to lock.
-
-        Returns:
-            Path: Path to the lock file.
-        """
-        return config_file.with_suffix(config_file.suffix + ".lock")
-
-    def _try_create_lock(self, config_file: Path) -> bool:
-        """
-        Attempt to create the lock file atomically.
-
-        Responsibility:
-            - Create the ``.lock`` file when it does not exist, signaling
-              exclusive ownership.
-
-        Contracts:
-            Preconditions:
-                - ``config_file`` is a Path to the JSON configuration file.
-            Postconditions:
-                - Returns True if the lock file is created, False if it already
-                  exists.
-
-        Args:
-            config_file (Path): JSON configuration file whose lock is acquired.
-
-        Returns:
-            bool: True when the lock file is created; False otherwise.
-        """
-        lock_path = self._lock_path(config_file)
-        try:
-            with lock_path.open("x", encoding="utf-8") as lock_file:
-                lock_file.write(str(int(time.time() * 1000)))
-            return True
-        except FileExistsError:
-            return False
-
-    def _read_lock_timestamp_ms(self, config_file: Path) -> int | None:
-        """
-        Read the timestamp stored inside the lock file.
-
-        Responsibility:
-            - Extract the millisecond epoch written when the lock was created.
-
-        Contracts:
-            Preconditions:
-                - ``config_file`` refers to the JSON configuration file whose
-                  lock may exist.
-            Postconditions:
-                - Returns the parsed integer timestamp in milliseconds when
-                  readable; otherwise returns None.
-
-        Args:
-            config_file (Path): JSON configuration file whose lock timestamp is
-                read.
-
-        Returns:
-            int | None: Timestamp in milliseconds if available; otherwise None.
-        """
-        try:
-            lock_path = self._lock_path(config_file)
-            with lock_path.open("r", encoding="utf-8") as lock_file:
-                content = lock_file.read().strip()
-        except OSError:
-            return None
-
-        if not content:
-            return None
+        if owner_pid != pid:
+            raise RuntimeError(
+                "Attempted to release a lock not owned by this process"
+            )
 
         try:
-            return int(content)
-        except ValueError:
-            return None
+            lock_path.unlink()
+        except FileNotFoundError:
+            raise RuntimeError(
+                "Lock file disappeared before it could be released"
+            )
 
-    def _is_lock_stale(self, config_file: Path, now_ms: int) -> bool:
+    @staticmethod
+    def _is_lock_stale(lock_path: Path) -> bool:
         """
         Determine whether the lock for ``config_file`` is stale.
 
+        Note:
+
         Responsibility:
-            - Decide if the existing lock should be considered expired based on
-              its stored timestamp and the configured TTL.
+            - Decide if the existing lock should be considered expired.
+            - The principal criteria for staleness are:
+                - The lock file's age exceeds a predefined TTL, via monotonic time.
+                    This is the principal mechanism to avoid deadlocks.
+                - The process that created the lock no longer exists.
+                    We check via PID existence, as secondary mechanism.
 
         Contracts:
             Preconditions:
-                - ``config_file`` is a Path to the JSON configuration file.
-                - ``now_ms`` is the current epoch time in milliseconds.
+                - ``lock_file`` is a Path to the lock file.
             Postconditions:
                 - Returns True when the lock is expired or invalid; False when
                   it is still valid or absent.
 
         Args:
-            config_file (Path): JSON configuration file whose lock is evaluated.
-            now_ms (int): Current epoch time in milliseconds.
+            lock_file (Path): JSON configuration file whose lock is evaluated.
 
         Returns:
             bool: True if the lock is stale; False otherwise.
         """
-        if not self._is_locked(config_file):
-            return False
+        try:
+            content = lock_path.read_text()
+            pid_str, created_str = content.split(":")
+            pid = int(pid_str)
+            created = float(created_str)
+        except Exception:
+            return True  # lock corrupto = stale
+        
+        lifetime = time.monotonic() - created
 
-        timestamp_ms = self._read_lock_timestamp_ms(config_file)
-        if timestamp_ms is None:
+        if lifetime > JSONBackend._LOCK_TTL_SECONDS:
             return True
 
-        ttl_ms = int(self._lock_ttl_seconds * 1000)
-        if timestamp_ms > now_ms: # future timestamp, consider invalid
+        if not JSONBackend._process_exists(pid):
             return True
-        return now_ms - timestamp_ms >= ttl_ms
 
-    def _is_locked(self, config_file: Path) -> bool:
+        return False
+
+    @staticmethod
+    def _process_exists(pid: int) -> bool:
         """
-        Determine whether ``config_file`` is currently locked.
+        Check if a process with the given PID exists.
+
+        Note:
+            We need to know exactly if the process does NOT exist, we can't have false positives.
+            However, we can afford false negatives.
+            This is because if we detect a false positive, we delete a lock that is still valid,
+            which can lead to data corruption.
+            On the other hand, if we detect a false negative, we just wait longer to acquire the lock, by
+            TTL mechanism.
 
         Responsibility:
-            - Check for the presence of the companion ``.lock`` file.
+            - Determine if a process with the specified PID is currently running.
+        Contracts:
+            Preconditions:
+                - ``pid`` is a positive integer representing a process ID.
+            Postconditions:
+                - Returns True if the process exists; False otherwise.
+                - We assure non-existence, but existence is not 100% guaranteed, 
+                    especially in Windows.
+            Args:
+                pid (int): Process ID to check.
+
+            Returns:
+                bool: True if the process exists; False otherwise.
+        """
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        else:
+            return True
+    
+    @staticmethod
+    def _break_stale_lock(lock_path) -> bool:
+        """
+        Attempt to remove a stale lock file.
+
+        Responsibility:
+            - Delete the lock file if it exists, indicating the lock is no longer valid.
 
         Contracts:
             Preconditions:
-                - ``config_file`` is a Path to the JSON configuration file.
+                - The lock file path is provided.
             Postconditions:
-                - Returns True if the ``.lock`` file exists; False otherwise.
+                - The lock file is removed if it existed.
 
         Args:
-            config_file (Path): JSON configuration file to check.
+            lock_path (Path): Path to the lock file.
 
         Returns:
-            bool: True when the resource is locked; False otherwise.
+            bool: True if the lock file was removed; False if it did not exist.
         """
-        return self._lock_path(config_file).exists()
+        try:
+            lock_path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+

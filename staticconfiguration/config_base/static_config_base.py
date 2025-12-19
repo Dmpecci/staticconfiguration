@@ -41,7 +41,7 @@ class StaticConfigBase(StaticConfigInterface):
             - set validates the type and persists the new value using JSONBackend.
     """
     @classmethod
-    def get(cls, data_field: Data):
+    def get(cls, data_field: Data, concurrency_unsafe: bool = False) -> object:
         """
         Retrieve the configuration value associated with ``data_field``.
 
@@ -60,6 +60,9 @@ class StaticConfigBase(StaticConfigInterface):
 
         Args:
             data_field (Data): Data descriptor attribute to retrieve.
+            concurrency_unsafe (bool): If True, operations will be unsafe for
+                concurrent access. Default is False. Data integrity may be compromised
+                if multiple processes write concurrently. Use with caution.
 
         Returns:
             Any: Field value decoded according to Data rules.
@@ -76,14 +79,12 @@ class StaticConfigBase(StaticConfigInterface):
 
         data = cls._resolve_data_field(data_field, data_fields)
         config_path = Path(cls.__config_path__).expanduser() / cls.__config_file__
-
         backend = JSONBackend()
-        backend.ensure_safe_state(config_path, cls.__version__, list(data_fields.values()), cls.__development__)
 
-        return backend.read_value(data, config_path)
+        return backend.read_value(data, config_path, cls.__version__, list(data_fields.values()), cls.__development__, concurrency_unsafe)
     
     @classmethod
-    def set(cls, data_field: Data, new_value: object):
+    def set(cls, data_field: Data, new_value: object, concurrency_unsafe: bool = False) -> None:
         """
         Assign and persist a new value for the specified field.
 
@@ -104,6 +105,11 @@ class StaticConfigBase(StaticConfigInterface):
             data_field (Data): Data descriptor attribute to modify.
             new_value (object): New value that must be compatible with the type
                 declared in the corresponding Data.
+            concurrency_unsafe (bool): If True, operations will be unsafe for
+                concurrent access. Default is False. Data integrity may be compromised
+                if multiple processes write concurrently.
+                Writting is more likely to corrupt the file if multiple processes write
+                concurrently. Use with caution.
 
         Returns:
             None: Persists the new value to disk.
@@ -125,9 +131,7 @@ class StaticConfigBase(StaticConfigInterface):
 
         config_path = Path(cls.__config_path__).expanduser() / cls.__config_file__
 
-        backend = JSONBackend()
-        backend.ensure_safe_state(config_path, cls.__version__, list(data_fields.values()), cls.__development__)
-        backend.write_value(data, new_value, config_path)
+        JSONBackend.write_value(data, new_value, config_path, cls.__version__, list(data_fields.values()), cls.__development__, concurrency_unsafe)
 
     @classmethod
     def _get_data_fields(cls) -> dict[str, Data]:
