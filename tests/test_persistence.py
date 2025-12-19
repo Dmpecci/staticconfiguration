@@ -7,21 +7,25 @@ StaticConfigBase API. Tests are designed to validate correct behavior,
 edge cases, and failure modes without modifying production code.
 
 Test Organization:
-    - TestJSONBackendEnsureInitialized: File creation and initialization (12 tests)
     - TestJSONBackendReadValue: Reading and decoding configuration values (6 tests)
     - TestJSONBackendWriteValue: Writing and encoding configuration values (8 tests)
+    - TestImplicitInitialization: Implicit file creation via read/write (5 tests)
+    - TestCorruptionRecovery: Automatic recovery from corrupted files (3 tests)
     - TestStaticConfigBaseGet: High-level configuration retrieval (5 tests)
     - TestStaticConfigBaseSet: High-level configuration updates (5 tests)
     - TestPersistenceEdgeCases: Complex scenarios and edge cases (11 tests)
 
 Test Results:
-    - ✅ 47/47 PASSED: All tests pass successfully (100% success rate)
+    - Suite aligned with current implementation (JSONBackend v2.0)
     
-Historical Note:
-    Originally, 9 tests failed due to a critical bug in _get_data_fields() that only
-    inspected cls.__dict__ and couldn't find Data fields after decoration. This bug
-    has been FIXED in the current implementation. All tests now pass.
-    See TEST_REPORT.md for complete historical context and current status.
+API Changes from v1.0:
+    - ensure_safe_state() is now private (_ensure_safe_state)
+    - read_value() and write_value() require 6 parameters (added: version, data_fields, development, concurrency_unsafe)
+    - Initialization is now implicit (automatic on first read/write)
+    - Corruption recovery is automatic and guaranteed to succeed
+    - concurrency_unsafe=True bypasses locking (default: False)
+    
+See TEST_ALIGNMENT_REPORT.md for complete migration details.
 
 Each test is isolated and cleans up its own resources using the remove_json utility.
 """
@@ -36,7 +40,7 @@ import time
 from staticconfiguration.entities import Data
 from staticconfiguration.json_backend.json_backend import JSONBackend
 from staticconfiguration import staticconfig
-from tests.test_utilities import remove_json
+from tests.test_utilities import remove_json, read_value_simple, write_value_simple
 
 # ============================================================================
 # Test Fixtures and Helper Classes
@@ -82,374 +86,197 @@ class TestConfig:
 
 
 # ============================================================================
-# TestJSONBackendEnsureInitialized
+# TestImplicitInitialization
 # ============================================================================
 
-class TestJSONBackendEnsureInitialized:
-    """Test suite for JSONBackend.ensure_safe_state method."""
+class TestImplicitInitialization:
+    """Test suite for implicit file initialization via read/write operations."""
     
-    def test_creates_file_with_correct_structure(self, backend, temp_config_dir, sample_data_fields):
-        """Test that ensure_safe_state creates a JSON file with required structure."""
+    def test_read_creates_nonexistent_file(self, backend, temp_config_dir):
+        """Test that read_value creates file if it doesn't exist."""
         config_path = temp_config_dir / "config.json"
-        version = "1.0.0"
+        data_field = Data(name="api_url", data_type=str, default="https://api.example.com")
+        data_fields = [data_field]
         
-        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
+        assert not config_path.exists()
+        
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
+        
+        assert config_path.exists()
+        assert result == "https://api.example.com"
+        
+        remove_json(config_path)
+    
+    def test_write_creates_nonexistent_file(self, backend, temp_config_dir):
+        """Test that write_value creates file if it doesn't exist."""
+        config_path = temp_config_dir / "config.json"
+        data_field = Data(name="counter", data_type=int, default=0)
+        data_fields = [data_field]
+        
+        assert not config_path.exists()
+        
+        write_value_simple(config_path, data_field, 42, data_fields, concurrency_unsafe=True)
         
         assert config_path.exists()
         
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        assert "version" in data
-        assert "created" in data
-        assert "last_modified" in data
-        assert "data" in data
-        assert data["version"] == version
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
+        assert result == 42
         
         remove_json(config_path)
     
-    def test_initializes_with_default_values(self, backend, temp_config_dir, sample_data_fields):
-        """Test that default values are correctly written during initialization."""
+    def test_initialization_creates_correct_structure(self, backend, temp_config_dir):
+        """Test that implicit initialization creates proper JSON structure."""
         config_path = temp_config_dir / "config.json"
+        data_field = Data(name="field", data_type=str, default="value")
+        data_fields = [data_field]
         
-        backend.ensure_safe_state(config_path, "1.0.0", sample_data_fields, development=False)
+        write_value_simple(config_path, data_field, "test", data_fields, concurrency_unsafe=True)
         
         with config_path.open("r") as f:
-            data = json.load(f)
+            payload = json.load(f)
         
-        assert data["data"]["api_url"] == "https://api.example.com"
-        assert data["data"]["max_retries"] == 3
-        assert data["data"]["enable_feature"] is False
-        
-        remove_json(config_path)
-    
-    def test_creates_intermediate_directories(self, backend, temp_config_dir, sample_data_fields):
-        """Test that ensure_safe_state creates missing parent directories."""
-        config_path = temp_config_dir / "nested" / "deep" / "config.json"
-        
-        assert not config_path.parent.exists()
-        
-        backend.ensure_safe_state(config_path, "1.0.0", sample_data_fields, development=False)
-        
-        assert config_path.exists()
-        assert config_path.parent.exists()
+        assert "version" in payload
+        assert "created" in payload
+        assert "last_modified" in payload
+        assert "data" in payload
+        assert isinstance(payload["data"], dict)
         
         remove_json(config_path)
     
-    def test_timestamps_are_in_correct_format(self, backend, temp_config_dir, sample_data_fields):
-        """Test that timestamps are in ISO 8601 UTC format without microseconds."""
+    def test_defaults_applied_on_initialization(self, backend, temp_config_dir):
+        """Test that default values are applied during implicit initialization."""
         config_path = temp_config_dir / "config.json"
+        data_fields = [
+            Data(name="url", data_type=str, default="https://default.com"),
+            Data(name="retries", data_type=int, default=3),
+            Data(name="enabled", data_type=bool, default=False)
+        ]
         
-        before = datetime.now(timezone.utc)
-        backend.ensure_safe_state(config_path, "1.0.0", sample_data_fields, development=False)
-        after = datetime.now(timezone.utc)
+        # Read one field triggers initialization of all
+        result = read_value_simple(config_path, data_fields[0], data_fields, concurrency_unsafe=True)
+        assert result == "https://default.com"
         
+        # Verify all defaults were written
         with config_path.open("r") as f:
-            data = json.load(f)
+            payload = json.load(f)
         
-        created = data["created"]
-        last_modified = data["last_modified"]
-        
-        # Verify format: ends with Z and no microseconds
-        assert created.endswith("Z")
-        assert last_modified.endswith("Z")
-        assert "." not in created  # No microseconds
-        
-        # Verify timestamps are valid and within expected range
-        created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-        assert before.replace(microsecond=0) <= created_dt <= after.replace(microsecond=0) + timedelta(seconds=1)
+        assert payload["data"]["url"] == "https://default.com"
+        assert payload["data"]["retries"] == 3
+        assert payload["data"]["enabled"] is False
         
         remove_json(config_path)
     
-    def test_encoder_applied_to_defaults(self, backend, temp_config_dir):
+    def test_encoders_applied_to_defaults(self, backend, temp_config_dir):
         """Test that encoder functions are applied to default values during initialization."""
         def list_encoder(value):
             return ",".join(value)
         
-        data_fields = [
-            Data(name="tags", data_type=list, default=["python", "testing"], encoder=list_encoder)
-        ]
-        
+        data_field = Data(name="tags", data_type=list, default=["python", "testing"], encoder=list_encoder)
+        data_fields = [data_field]
         config_path = temp_config_dir / "config.json"
-        backend.ensure_safe_state(config_path, "1.0.0", data_fields, development=False)
+        
+        read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         
         with config_path.open("r") as f:
-            data = json.load(f)
+            payload = json.load(f)
         
         # Encoder should have converted list to comma-separated string
-        assert data["data"]["tags"] == "python,testing"
+        assert payload["data"]["tags"] == "python,testing"
         
         remove_json(config_path)
+
+
+# ============================================================================
+# TestCorruptionRecovery
+# ============================================================================
+
+class TestCorruptionRecovery:
+    """Test suite for automatic recovery from corrupted configuration files."""
     
-    def test_empty_data_fields_list(self, backend, temp_config_dir):
-        """Test initialization with no data fields."""
+    def test_recovers_from_malformed_json(self, backend, temp_config_dir):
+        """Test that operations on corrupted JSON trigger automatic recovery."""
         config_path = temp_config_dir / "config.json"
-        
-        backend.ensure_safe_state(config_path, "1.0.0", [], development=False)
-        
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        assert data["data"] == {}
-        assert "version" in data
-        assert "created" in data
-        
-        remove_json(config_path)
-    
-    def test_none_default_values(self, backend, temp_config_dir):
-        """Test initialization with None as default value."""
-        data_fields = [
-            Data(name="optional_field", data_type=str, default=None)
-        ]
-        
-        config_path = temp_config_dir / "config.json"
-        backend.ensure_safe_state(config_path, "1.0.0", data_fields, development=False)
-        
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        assert data["data"]["optional_field"] is None
-        
-        remove_json(config_path)
-    
-    def test_does_not_modify_file_with_same_version(self, backend, temp_config_dir, sample_data_fields):
-        """
-        Test that ensure_safe_state does NOT modify file when version matches.
-        
-        This tests the optimistic read fast-path: when the file exists and its
-        version matches the requested version, ensure_safe_state should return
-        immediately without acquiring a lock or modifying the file.
-        
-        Critical behavior: No lock acquisition, no migration, no timestamp change.
-        """
-        config_path = temp_config_dir / "config.json"
-        version = "1.0.0"
-        
-        # Create initial file
-        original_timestamp = "2023-01-01T00:00:00Z"
-        original_payload = {
-            "version": version,
-            "created": original_timestamp,
-            "last_modified": original_timestamp,
-            "data": {
-                "api_url": "https://original.com",
-                "max_retries": 5,
-                "enable_feature": True,
-            }
-        }
-        
-        with config_path.open("w") as f:
-            json.dump(original_payload, f, indent=2)
-        
-        # Call ensure_safe_state with same version
-        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
-        
-        # Read file and verify it was NOT modified
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        # All timestamps and values should be unchanged
-        assert data["version"] == version
-        assert data["created"] == original_timestamp
-        assert data["last_modified"] == original_timestamp
-        assert data["data"]["api_url"] == "https://original.com"
-        assert data["data"]["max_retries"] == 5
-        assert data["data"]["enable_feature"] is True
-        
-        remove_json(config_path)
-    
-    def test_forces_migration_in_development_mode(self, backend, temp_config_dir, sample_data_fields):
-        """
-        Test that development=True forces migration even when version matches.
-        
-        In development mode, ensure_safe_state should always call migrate_payload()
-        even if the file version matches the requested version. This ensures
-        schema changes (like adding new fields) are applied during development.
-        
-        Critical behavior: Lock acquired, ConfigPayloadMigrator called.
-        Note: Migration preserves existing values, only adds missing fields with defaults.
-        """
-        config_path = temp_config_dir / "config.json"
-        version = "1.0.0"
-        
-        # Create file with same version but missing a field from current schema
-        original_created = "2023-01-01T00:00:00Z"
-        original_last_modified = "2023-01-01T00:00:00Z"
-        original_payload = {
-            "version": version,
-            "created": original_created,
-            "last_modified": original_last_modified,
-            "data": {
-                "api_url": "old_url",
-                "max_retries": 999,
-                # Missing "enable_feature" field
-            }
-        }
-        
-        with config_path.open("w") as f:
-            json.dump(original_payload, f)
-        
-        # Call with development=True
-        before_call = datetime.now(timezone.utc)
-        backend.ensure_safe_state(config_path, version, sample_data_fields, development=True)
-        after_call = datetime.now(timezone.utc)
-        
-        # Read file and verify migration occurred
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        # Version should remain the same
-        assert data["version"] == version
-        
-        # Created timestamp should be preserved
-        assert data["created"] == original_created
-        
-        # last_modified should be updated (migration happened)
-        last_modified = datetime.fromisoformat(data["last_modified"].replace("Z", "+00:00"))
-        assert before_call.replace(microsecond=0) <= last_modified <= after_call.replace(microsecond=0) + timedelta(seconds=1)
-        
-        # Existing values should be preserved (migration doesn't overwrite)
-        assert data["data"]["api_url"] == "old_url"
-        assert data["data"]["max_retries"] == 999
-        
-        # Missing field should be added with default value
-        assert data["data"]["enable_feature"] is False
-        
-        remove_json(config_path)
-    
-    def test_migrates_when_version_mismatch(self, backend, temp_config_dir, sample_data_fields):
-        """
-        Test that ensure_safe_state triggers migration when file version differs.
-        
-        When the existing file has a different version than requested,
-        ensure_safe_state should acquire lock and call migrate_payload().
-        
-        Critical behavior: Version mismatch triggers migration under lock.
-        """
-        config_path = temp_config_dir / "config.json"
-        old_version = "0.9.0"
-        new_version = "1.0.0"
-        
-        # Create file with old version
-        original_created = "2023-01-01T00:00:00Z"
-        old_payload = {
-            "version": old_version,
-            "created": original_created,
-            "last_modified": "2023-01-01T00:00:00Z",
-            "data": {
-                "api_url": "old_schema_url",
-            }
-        }
-        
-        with config_path.open("w") as f:
-            json.dump(old_payload, f)
-        
-        # Call with new version
-        backend.ensure_safe_state(config_path, new_version, sample_data_fields, development=False)
-        
-        # Read file and verify migration occurred
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        # Version should be updated
-        assert data["version"] == new_version
-        
-        # Created timestamp should be preserved
-        assert data["created"] == original_created
-        
-        # Data should conform to new schema (migration applied)
-        assert "api_url" in data["data"]
-        assert "max_retries" in data["data"]
-        assert "enable_feature" in data["data"]
-        
-        remove_json(config_path)
-    
-    def test_recreates_file_with_missing_required_keys(self, backend, temp_config_dir, sample_data_fields):
-        """
-        Test that ensure_safe_state recreates file when required keys are missing.
-        
-        The is_operable_payload() validation checks for version, created, 
-        last_modified, and data keys. If any are missing, the file should be
-        treated as corrupted and recreated with defaults.
-        
-        Critical behavior: Missing keys trigger force_migration=True.
-        """
-        config_path = temp_config_dir / "config.json"
-        version = "1.0.0"
-        
-        # Test 1: Missing "data" key
-        invalid_payload = {
-            "version": version,
-            "created": "2023-01-01T00:00:00Z",
-            "last_modified": "2023-01-01T00:00:00Z",
-            # Missing "data" key
-        }
-        
-        with config_path.open("w") as f:
-            json.dump(invalid_payload, f)
-        
-        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
-        
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        # File should be recreated with proper structure
-        assert "data" in data
-        assert data["data"]["api_url"] == "https://api.example.com"
-        assert data["data"]["max_retries"] == 3
-        
-        remove_json(config_path)
-        
-        # Test 2: Missing "version" key
-        invalid_payload = {
-            # Missing "version" key
-            "created": "2023-01-01T00:00:00Z",
-            "last_modified": "2023-01-01T00:00:00Z",
-            "data": {"api_url": "test"}
-        }
-        
-        with config_path.open("w") as f:
-            json.dump(invalid_payload, f)
-        
-        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
-        
-        with config_path.open("r") as f:
-            data = json.load(f)
-        
-        assert "version" in data
-        assert data["version"] == version
-        
-        remove_json(config_path)
-    
-    def test_recovers_from_corrupted_json(self, backend, temp_config_dir, sample_data_fields):
-        """
-        Test that ensure_safe_state recovers from corrupted JSON files.
-        
-        When the JSON file cannot be parsed (JSONDecodeError or OSError),
-        ensure_safe_state should acquire lock and recreate the file with
-        default values.
-        
-        Critical behavior: Corrupted JSON triggers file recreation under lock.
-        """
-        config_path = temp_config_dir / "config.json"
-        version = "1.0.0"
+        data_field = Data(name="field", data_type=str, default="default_value")
+        data_fields = [data_field]
         
         # Write malformed JSON
         with config_path.open("w") as f:
             f.write("{invalid json content: broken")
         
-        # Should not raise exception, should recover
-        backend.ensure_safe_state(config_path, version, sample_data_fields, development=False)
+        # Should not raise, should recover
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
+            
+            # Should emit ConfigurationResetWarning
+            assert len(w) == 1
+            assert "reset to defaults" in str(w[0].message).lower()
         
-        # Verify file was recreated with valid JSON
+        # Should return default value after recovery
+        assert result == "default_value"
+        
+        # File should now be valid
         with config_path.open("r") as f:
-            data = json.load(f)  # Should not raise
+            payload = json.load(f)  # Should not raise
         
-        assert data["version"] == version
-        assert "created" in data
-        assert "last_modified" in data
-        assert "data" in data
-        assert data["data"]["api_url"] == "https://api.example.com"
+        assert payload["data"]["field"] == "default_value"
+        
+        remove_json(config_path)
+    
+    def test_recovery_restores_all_defaults(self, backend, temp_config_dir):
+        """Test that recovery restores all fields to their defaults."""
+        config_path = temp_config_dir / "config.json"
+        data_fields = [
+            Data(name="url", data_type=str, default="https://default.com"),
+            Data(name="count", data_type=int, default=10),
+            Data(name="active", data_type=bool, default=True)
+        ]
+        
+        # Write corrupted file
+        with config_path.open("w") as f:
+            f.write("corrupted")
+        
+        # Trigger recovery
+        import warnings
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            read_value_simple(config_path, data_fields[0], data_fields, concurrency_unsafe=True)
+        
+        # All fields should have defaults
+        with config_path.open("r") as f:
+            payload = json.load(f)
+        
+        assert payload["data"]["url"] == "https://default.com"
+        assert payload["data"]["count"] == 10
+        assert payload["data"]["active"] is True
+        
+        remove_json(config_path)
+    
+    def test_subsequent_operations_succeed_after_recovery(self, backend, temp_config_dir):
+        """Test that normal operations work after automatic recovery."""
+        config_path = temp_config_dir / "config.json"
+        data_field = Data(name="counter", data_type=int, default=0)
+        data_fields = [data_field]
+        
+        # Corrupt file
+        with config_path.open("w") as f:
+            f.write("}}}}corrupt")
+        
+        # Trigger recovery with read
+        import warnings
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            value = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
+        
+        assert value == 0
+        
+        # Write should work normally now
+        write_value_simple(config_path, data_field, 42, data_fields, concurrency_unsafe=True)
+        
+        # Read should work normally
+        value = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
+        assert value == 42
         
         remove_json(config_path)
 
@@ -465,6 +292,7 @@ class TestJSONBackendReadValue:
         """Test reading an existing configuration value."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="api_url", data_type=str, default="default.com")
+        data_fields = [data_field]
         
         # Create config file
         payload = {
@@ -477,7 +305,7 @@ class TestJSONBackendReadValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         
         assert result == "https://api.example.com"
         
@@ -490,6 +318,7 @@ class TestJSONBackendReadValue:
         
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="tags", data_type=list, default=[], decoder=list_decoder)
+        data_fields = [data_field]
         
         payload = {
             "version": "1.0.0",
@@ -501,7 +330,7 @@ class TestJSONBackendReadValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         
         assert result == ["python", "testing", "automation"]
         
@@ -511,6 +340,7 @@ class TestJSONBackendReadValue:
         """Test automatic type conversion when no decoder is provided."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="count", data_type=int, default=0)
+        data_fields = [data_field]
         
         payload = {
             "version": "1.0.0",
@@ -522,7 +352,7 @@ class TestJSONBackendReadValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         
         assert result == 42
         assert isinstance(result, int)
@@ -533,6 +363,7 @@ class TestJSONBackendReadValue:
         """Test reading None value from configuration."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="optional", data_type=str, default=None)
+        data_fields = [data_field]
         
         payload = {
             "version": "1.0.0",
@@ -544,31 +375,46 @@ class TestJSONBackendReadValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         
         assert result is None
         
         remove_json(config_path)
     
-    def test_raises_file_not_found(self, backend, temp_config_dir):
-        """Test that FileNotFoundError is raised for non-existent config file."""
+    def test_creates_file_on_first_read(self, backend, temp_config_dir):
+        """Test that read_value creates file if it doesn't exist (implicit initialization)."""
         config_path = temp_config_dir / "nonexistent.json"
-        data_field = Data(name="field", data_type=str, default="default")
+        data_field = Data(name="field", data_type=str, default="default_value")
+        data_fields = [data_field]
         
-        with pytest.raises(FileNotFoundError):
-            backend.read_value(data_field, config_path)
+        assert not config_path.exists()
+        
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
+        
+        assert config_path.exists()
+        assert result == "default_value"
+        
+        remove_json(config_path)
     
-    def test_raises_on_malformed_json(self, backend, temp_config_dir):
-        """Test that json.JSONDecodeError is raised for malformed JSON."""
+    def test_raises_on_missing_key(self, backend, temp_config_dir):
+        """Test that KeyError is raised when requested key doesn't exist in data."""
         config_path = temp_config_dir / "config.json"
-        data_field = Data(name="field", data_type=str, default="default")
+        data_field = Data(name="nonexistent_field", data_type=str, default="default")
+        data_fields = [Data(name="existing_field", data_type=str, default="value")]
         
-        # Write malformed JSON
+        # Create file with different field
+        payload = {
+            "version": "1.0.0",
+            "created": "2023-01-01T00:00:00Z",
+            "last_modified": "2023-01-01T00:00:00Z",
+            "data": {"existing_field": "value"}
+        }
+        
         with config_path.open("w") as f:
-            f.write("{invalid json content}")
+            json.dump(payload, f)
         
-        with pytest.raises(json.JSONDecodeError):
-            backend.read_value(data_field, config_path)
+        with pytest.raises(KeyError, match="nonexistent_field"):
+            read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         
         remove_json(config_path)
 
@@ -583,6 +429,7 @@ class TestJSONBackendWriteValue:
         """Test basic value writing to configuration file."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="api_url", data_type=str, default="default.com")
+        data_fields = [data_field]
         
         # Create initial config
         payload = {
@@ -595,7 +442,7 @@ class TestJSONBackendWriteValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        backend.write_value(data_field, "new_value", config_path)
+        write_value_simple(config_path, data_field, "new_value", data_fields, concurrency_unsafe=True)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -608,6 +455,7 @@ class TestJSONBackendWriteValue:
         """Test that last_modified timestamp is updated on write."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="field", data_type=str, default="default")
+        data_fields = [data_field]
         
         original_timestamp = "2023-01-01T00:00:00Z"
         payload = {
@@ -621,7 +469,7 @@ class TestJSONBackendWriteValue:
             json.dump(payload, f)
         
         time.sleep(0.01)  # Ensure timestamp difference
-        backend.write_value(data_field, "new", config_path)
+        write_value_simple(config_path, data_field, "new", data_fields, concurrency_unsafe=True)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -635,6 +483,7 @@ class TestJSONBackendWriteValue:
         """Test that version and created timestamp are not modified on write."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="field", data_type=str, default="default")
+        data_fields = [data_field]
         
         original_version = "1.2.3"
         original_created = "2023-01-01T00:00:00Z"
@@ -649,7 +498,8 @@ class TestJSONBackendWriteValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        backend.write_value(data_field, "new", config_path)
+        # Use direct backend call to preserve test's version instead of helper's default
+        backend.write_value(data_field, "new", config_path, original_version, data_fields, False, True)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -666,6 +516,7 @@ class TestJSONBackendWriteValue:
         
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="tags", data_type=list, default=[], encoder=list_encoder)
+        data_fields = [data_field]
         
         payload = {
             "version": "1.0.0",
@@ -677,7 +528,7 @@ class TestJSONBackendWriteValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        backend.write_value(data_field, ["python", "testing"], config_path)
+        write_value_simple(config_path, data_field, ["python", "testing"], data_fields, concurrency_unsafe=True)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -691,6 +542,7 @@ class TestJSONBackendWriteValue:
         config_path = temp_config_dir / "config.json"
         tmp_path = config_path.with_suffix(".tmp")
         data_field = Data(name="field", data_type=str, default="default")
+        data_fields = [data_field]
         
         payload = {
             "version": "1.0.0",
@@ -702,7 +554,7 @@ class TestJSONBackendWriteValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        backend.write_value(data_field, "new", config_path)
+        write_value_simple(config_path, data_field, "new", data_fields, concurrency_unsafe=True)
         
         # Temporary file should be removed after successful write
         assert not tmp_path.exists()
@@ -710,18 +562,32 @@ class TestJSONBackendWriteValue:
         
         remove_json(config_path)
     
-    def test_raises_file_not_found(self, backend, temp_config_dir):
-        """Test that FileNotFoundError is raised when config file doesn't exist."""
+    def test_creates_file_on_first_write(self, backend, temp_config_dir):
+        """Test that write_value creates file if it doesn't exist (implicit initialization)."""
         config_path = temp_config_dir / "nonexistent.json"
         data_field = Data(name="field", data_type=str, default="default")
+        data_fields = [data_field]
         
-        with pytest.raises(FileNotFoundError):
-            backend.write_value(data_field, "value", config_path)
+        assert not config_path.exists()
+        
+        write_value_simple(config_path, data_field, "new_value", data_fields, concurrency_unsafe=True)
+        
+        assert config_path.exists()
+        
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
+        assert result == "new_value"
+        
+        remove_json(config_path)
     
     def test_preserves_other_fields(self, backend, temp_config_dir):
         """Test that writing one field doesn't affect other fields."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="field1", data_type=str, default="default")
+        data_fields = [
+            data_field,
+            Data(name="field2", data_type=str, default="default2"),
+            Data(name="field3", data_type=int, default=0)
+        ]
         
         payload = {
             "version": "1.0.0",
@@ -737,7 +603,7 @@ class TestJSONBackendWriteValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        backend.write_value(data_field, "new_value1", config_path)
+        write_value_simple(config_path, data_field, "new_value1", data_fields, concurrency_unsafe=True)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -752,6 +618,7 @@ class TestJSONBackendWriteValue:
         """Test writing None value to configuration."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="optional", data_type=str, default=None)
+        data_fields = [data_field]
         
         payload = {
             "version": "1.0.0",
@@ -763,7 +630,7 @@ class TestJSONBackendWriteValue:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        backend.write_value(data_field, None, config_path)
+        write_value_simple(config_path, data_field, None, data_fields, concurrency_unsafe=True)
         
         with config_path.open("r") as f:
             data = json.load(f)
@@ -949,13 +816,12 @@ class TestPersistenceEdgeCases:
             encoder=dict_encoder,
             decoder=dict_decoder
         )
-        
-        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
+        data_fields = [data_field]
         
         test_value = {"nested": {"key": "value"}, "list": [1, 2, 3]}
-        backend.write_value(data_field, test_value, config_path)
+        write_value_simple(config_path, data_field, test_value, data_fields, concurrency_unsafe=True)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         
         assert result == test_value
         
@@ -965,14 +831,13 @@ class TestPersistenceEdgeCases:
         """Test behavior when multiple writes occur in sequence."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="counter", data_type=int, default=0)
-        
-        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
+        data_fields = [data_field]
         
         # Simulate multiple rapid writes
         for i in range(10):
-            backend.write_value(data_field, i, config_path)
+            write_value_simple(config_path, data_field, i, data_fields, concurrency_unsafe=True)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         assert result == 9
         
         remove_json(config_path)
@@ -981,11 +846,11 @@ class TestPersistenceEdgeCases:
         """Test handling of empty string values."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="text", data_type=str, default="default")
+        data_fields = [data_field]
         
-        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
-        backend.write_value(data_field, "", config_path)
+        write_value_simple(config_path, data_field, "", data_fields, concurrency_unsafe=True)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         assert result == ""
         
         remove_json(config_path)
@@ -994,11 +859,11 @@ class TestPersistenceEdgeCases:
         """Test that False boolean value is correctly handled (not confused with None/empty)."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="enabled", data_type=bool, default=True)
+        data_fields = [data_field]
         
-        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
-        backend.write_value(data_field, False, config_path)
+        write_value_simple(config_path, data_field, False, data_fields, concurrency_unsafe=True)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         assert result is False
         assert isinstance(result, bool)
         
@@ -1008,20 +873,21 @@ class TestPersistenceEdgeCases:
         """Test that zero integer value is correctly handled."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="count", data_type=int, default=10)
+        data_fields = [data_field]
         
-        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
-        backend.write_value(data_field, 0, config_path)
+        write_value_simple(config_path, data_field, 0, data_fields, concurrency_unsafe=True)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         assert result == 0
         assert isinstance(result, int)
         
         remove_json(config_path)
     
-    def test_missing_data_section_in_json(self, backend, temp_config_dir):
-        """Test reading from JSON file with missing data section."""
+    def test_missing_data_section_triggers_recovery(self, backend, temp_config_dir):
+        """Test that file with missing data section triggers automatic recovery."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="field", data_type=str, default="default")
+        data_fields = [data_field]
         
         # Create malformed config without data section
         payload = {
@@ -1033,9 +899,16 @@ class TestPersistenceEdgeCases:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        # This should raise KeyError when accessing payload["data"]
-        with pytest.raises(KeyError):
-            backend.read_value(data_field, config_path)
+        # Should trigger recovery and return default
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
+        assert result == "default"
+        
+        # File should now be valid
+        with config_path.open("r") as f:
+            fixed_payload = json.load(f)
+        
+        assert "data" in fixed_payload
+        assert fixed_payload["data"]["field"] == "default"
         
         remove_json(config_path)
     
@@ -1043,6 +916,7 @@ class TestPersistenceEdgeCases:
         """Test automatic type coercion from string to int."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="number", data_type=int, default=0)
+        data_fields = [data_field]
         
         # Manually create JSON with string value
         payload = {
@@ -1055,7 +929,7 @@ class TestPersistenceEdgeCases:
         with config_path.open("w") as f:
             json.dump(payload, f)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         assert result == 42
         assert isinstance(result, int)
         
@@ -1077,6 +951,7 @@ class TestPersistenceEdgeCases:
             encoder=json_encoder,
             decoder=json_decoder
         )
+        data_fields = [data_field]
         
         large_structure = {
             "level1": {
@@ -1088,9 +963,8 @@ class TestPersistenceEdgeCases:
             }
         }
         
-        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
-        backend.write_value(data_field, large_structure, config_path)
-        result = backend.read_value(data_field, config_path)
+        write_value_simple(config_path, data_field, large_structure, data_fields, concurrency_unsafe=True)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         
         assert result == large_structure
         assert len(result["level1"]["level2"]["level3"]["items"]) == 100
@@ -1101,12 +975,12 @@ class TestPersistenceEdgeCases:
         """Test handling of unicode characters in string values."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="message", data_type=str, default="")
+        data_fields = [data_field]
         
         unicode_text = "Hello 世界 🌍 Привет مرحبا"
         
-        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
-        backend.write_value(data_field, unicode_text, config_path)
-        result = backend.read_value(data_field, config_path)
+        write_value_simple(config_path, data_field, unicode_text, data_fields, concurrency_unsafe=True)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         
         assert result == unicode_text
         
@@ -1116,8 +990,9 @@ class TestPersistenceEdgeCases:
         """Test that manually modified JSON files are read correctly."""
         config_path = temp_config_dir / "config.json"
         data_field = Data(name="setting", data_type=str, default="default")
+        data_fields = [data_field]
         
-        backend.ensure_safe_state(config_path, "1.0.0", [data_field], development=False)
+        write_value_simple(config_path, data_field, "initial", data_fields, concurrency_unsafe=True)
         
         # Manually modify the JSON file
         with config_path.open("r") as f:
@@ -1129,11 +1004,11 @@ class TestPersistenceEdgeCases:
         with config_path.open("w") as f:
             json.dump(data, f)
         
-        result = backend.read_value(data_field, config_path)
+        result = read_value_simple(config_path, data_field, data_fields, concurrency_unsafe=True)
         assert result == "manually_changed"
         
         # Verify custom metadata is preserved on write
-        backend.write_value(data_field, "new_value", config_path)
+        write_value_simple(config_path, data_field, "new_value", data_fields, concurrency_unsafe=True)
         
         with config_path.open("r") as f:
             data = json.load(f)

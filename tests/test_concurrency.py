@@ -59,7 +59,7 @@ import tempfile
 
 from staticconfiguration.entities import Data
 from staticconfiguration.json_backend.json_backend import JSONBackend
-from tests.test_utilities import remove_json
+from tests.test_utilities import remove_json, read_value_simple, write_value_simple
 
 
 # ============================================================================
@@ -92,9 +92,19 @@ def sample_data_fields():
 def initialize_config(config_path: Path, data_fields: list):
     """Helper to initialize a config file for concurrent tests."""
     backend = JSONBackend()
-    backend.ensure_safe_state(config_path, "1.0.0", data_fields, development=False)
+    # Write first field to trigger initialization via _ensure_safe_state
+    if data_fields:
+        backend.write_value(
+            data=data_fields[0],
+            new_value=data_fields[0].default,
+            config_path=config_path,
+            version="1.0.0",
+            data_fields=data_fields,
+            development=False,
+            concurrency_unsafe=True
+        )
 
-def write_with_delay(config_path: Path, data_name: str, value, delay: float = 0):
+def write_with_delay(config_path: Path, data_name: str, value, delay: float = 0, data_fields: list = None):
     """
     Write a value to config with optional delay during lock hold.
     
@@ -103,9 +113,13 @@ def write_with_delay(config_path: Path, data_name: str, value, delay: float = 0)
     backend = JSONBackend()
     data_field = Data(name=data_name, data_type=type(value), default=None)
     
+    # Build minimal data_fields if not provided
+    if data_fields is None:
+        data_fields = [data_field]
+    
     if delay > 0:
         # Acquire lock and hold it during delay
-        backend.acquire_lock(config_path)
+        backend._acquire_lock(config_path)
         try:
             time.sleep(delay)
             # Read, modify, write manually to keep lock longer
@@ -122,26 +136,44 @@ def write_with_delay(config_path: Path, data_name: str, value, delay: float = 0)
             
             tmp_path.replace(config_path)
         finally:
-            backend.release_lock(config_path)
+            backend._release_lock(config_path)
     else:
-        backend.write_value(data_field, value, config_path)
+        backend.write_value(
+            data=data_field,
+            new_value=value,
+            config_path=config_path,
+            version="1.0.0",
+            data_fields=data_fields,
+            development=False,
+            concurrency_unsafe=False
+        )
 
 
-def read_value_process(config_path: Path, data_name: str, result_queue):
+def read_value_process(config_path: Path, data_name: str, result_queue, data_fields: list = None):
     """Process function to read a value and put it in a queue."""
     try:
         backend = JSONBackend()
         data_field = Data(name=data_name, data_type=int, default=0)
-        value = backend.read_value(data_field, config_path)
+        # Build minimal data_fields if not provided
+        if data_fields is None:
+            data_fields = [data_field]
+        value = backend.read_value(
+            data=data_field,
+            config_path=config_path,
+            version="1.0.0",
+            data_fields=data_fields,
+            development=False,
+            concurrency_unsafe=False
+        )
         result_queue.put(("success", value))
     except Exception as e:
         result_queue.put(("error", str(e)))
 
 
-def write_value_process(config_path: Path, data_name: str, value, delay: float = 0):
+def write_value_process(config_path: Path, data_name: str, value, delay: float = 0, data_fields: list = None):
     """Process function to write a value with optional delay."""
     try:
-        write_with_delay(config_path, data_name, value, delay)
+        write_with_delay(config_path, data_name, value, delay, data_fields)
     except Exception as e:
         pass  # Errors are not critical for these tests
 
@@ -207,10 +239,13 @@ def make_stale_lock(config_path: Path, ttl_seconds: float = 10.0):
         config_path: Path to the JSON config file
         ttl_seconds: TTL value to exceed (default: 10.0)
     """
-    # Create a timestamp that's older than TTL
-    now_ms = int(time.time() * 1000)
-    stale_timestamp = now_ms - int((ttl_seconds + 1) * 1000)
-    write_lock_file(config_path, stale_timestamp)
+    # Create a timestamp that's older than TTL using monotonic time
+    pid = os.getpid()
+    now = time.monotonic()
+    stale_time = now - (ttl_seconds + 1)  # Ensure it's beyond TTL
+    lock_path = config_path.with_suffix(config_path.suffix + ".lock")
+    with lock_path.open("w", encoding="utf-8") as f:
+        f.write(f"{pid}:{stale_time}")
 
 
 def make_fresh_lock(config_path: Path):
@@ -220,8 +255,11 @@ def make_fresh_lock(config_path: Path):
     Args:
         config_path: Path to the JSON config file
     """
-    now_ms = int(time.time() * 1000)
-    write_lock_file(config_path, now_ms)
+    pid = os.getpid()
+    now = time.monotonic()
+    lock_path = config_path.with_suffix(config_path.suffix + ".lock")
+    with lock_path.open("w", encoding="utf-8") as f:
+        f.write(f"{pid}:{now}")
 
 
 def make_invalid_lock(config_path: Path, content: str = ""):
@@ -358,7 +396,7 @@ class TestConcurrentWrites:
             
             # Final value should be from last writer (200)
             data_field = Data(name="counter", data_type=int, default=0)
-            final_value = backend.read_value(data_field, config_path)
+            final_value = read_value_simple(config_path, data_field, sample_data_fields)
             assert final_value == 200, "Last writer wins"
         finally:
             if p1.is_alive():
@@ -422,7 +460,7 @@ class TestConcurrentReads:
         
         # Set initial value
         data_field = Data(name="counter", data_type=int, default=0)
-        backend.write_value(data_field, 42, config_path)
+        write_value_simple(config_path, data_field, 42, sample_data_fields)
         
         num_readers = 10
         result_queue = multiprocessing.Queue()
@@ -478,7 +516,7 @@ class TestReadWriteInteraction:
         
         # Set initial value
         data_field = Data(name="counter", data_type=int, default=0)
-        backend.write_value(data_field, 10, config_path)
+        write_value_simple(config_path, data_field, 10, sample_data_fields)
         
         # Start writer with delay
         writer = multiprocessing.Process(
@@ -527,7 +565,7 @@ class TestReadWriteInteraction:
         
         # Set initial value
         data_field = Data(name="counter", data_type=int, default=0)
-        backend.write_value(data_field, 5, config_path)
+        write_value_simple(config_path, data_field, 5, sample_data_fields)
         
         # Start writer with delay
         writer = multiprocessing.Process(
@@ -582,7 +620,7 @@ class TestReadWriteInteraction:
 class TestStressScenarios:
     """Stress test with many concurrent readers and writers."""
     
-    def test_mixed_concurrent_operations(self, backend, temp_config_dir, sample_data_fields):
+    def test_mixed_concurrent_operations(self, temp_config_dir, sample_data_fields):
         """Verify system stability under mixed concurrent read/write load."""
         config_path = temp_config_dir / "config.json"
         initialize_config(config_path, sample_data_fields)
@@ -784,7 +822,8 @@ class TestEdgeCases:
         
         def write_then_sleep(config_path: Path):
             backend = JSONBackend()
-            backend.acquire_lock(config_path)
+            # Use _acquire_lock directly since acquire_lock is now private
+            backend._acquire_lock(config_path)
             # Simulate long operation - will be killed
             time.sleep(10)
         
@@ -818,11 +857,8 @@ class TestEdgeCases:
         config_path = temp_config_dir / "config.json"
         initialize_config(config_path, sample_data_fields)
         
-        backend.write_value(
-            Data(name="counter", data_type=int, default=0),
-            50,
-            config_path
-        )
+        data_field = Data(name="counter", data_type=int, default=0)
+        write_value_simple(config_path, data_field, 50, sample_data_fields)
         
         # Very fast write
         writer = multiprocessing.Process(
@@ -925,24 +961,18 @@ class TestTTLMechanism:
         make_stale_lock(config_path, ttl_seconds=10.0)
         assert check_lock_exists(config_path), "Stale lock should exist initially"
         
-        # Read timestamp of stale lock
+        # Read content of stale lock (format: pid:monotonic_time)
         lock_path = config_path.with_suffix(config_path.suffix + ".lock")
         with lock_path.open("r", encoding="utf-8") as f:
-            old_timestamp = int(f.read().strip())
+            old_content = f.read().strip()
         
         try:
             # Attempt write - should detect stale lock and recover
-            backend.write_value(
-                Data(name="counter", data_type=int, default=0),
-                999,
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            write_value_simple(config_path, data_field, 999, sample_data_fields)
             
             # Verify write succeeded
-            value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            value = read_value_simple(config_path, data_field, sample_data_fields)
             assert value == 999, "Write should succeed after stale lock removal"
             
             # Verify lock was recreated with new timestamp
@@ -975,17 +1005,17 @@ class TestTTLMechanism:
         make_fresh_lock(config_path)
         assert check_lock_exists(config_path), "Fresh lock should exist"
         
-        # Read timestamp of fresh lock
+        # Read content of fresh lock (format: pid:monotonic_time)
         lock_path = config_path.with_suffix(config_path.suffix + ".lock")
         with lock_path.open("r", encoding="utf-8") as f:
-            original_timestamp = int(f.read().strip())
+            original_content = f.read().strip()
         
         try:
             # Start write in separate process (should block on fresh lock)
             start_time = time.time()
             p = multiprocessing.Process(
                 target=write_value_process,
-                args=(config_path, "counter", 42, 0)
+                args=(config_path, "counter", 42, 0, sample_data_fields)
             )
             p.start()
             
@@ -995,12 +1025,12 @@ class TestTTLMechanism:
             # Verify original lock still exists (not removed as stale)
             assert check_lock_exists(config_path), "Fresh lock should not be removed"
             
-            # Verify timestamp unchanged (lock not replaced)
+            # Verify lock content unchanged (lock not replaced)
             with lock_path.open("r", encoding="utf-8") as f:
-                current_timestamp = int(f.read().strip())
+                current_content = f.read().strip()
             
-            # Timestamps should be very close (within a few ms due to timing)
-            # Original lock should not have been replaced
+            # Lock content should be identical (not replaced)
+            assert current_content == original_content, "Lock should not have been replaced"
             elapsed = time.time() - start_time
             assert elapsed < 2.0, "Process should still be waiting (not deadlocked)"
             
@@ -1037,16 +1067,10 @@ class TestTTLMechanism:
         assert check_lock_exists(config_path), "Invalid lock should exist"
         
         try:
-            backend.write_value(
-                Data(name="counter", data_type=int, default=0),
-                111,
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            write_value_simple(config_path, data_field, 111, sample_data_fields)
             
-            value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            value = read_value_simple(config_path, data_field, sample_data_fields)
             assert value == 111, "Write should succeed after removing invalid (empty) lock"
         finally:
             cleanup_locks(config_path)
@@ -1056,16 +1080,10 @@ class TestTTLMechanism:
         assert check_lock_exists(config_path), "Invalid lock should exist"
         
         try:
-            backend.write_value(
-                Data(name="counter", data_type=int, default=0),
-                222,
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            write_value_simple(config_path, data_field, 222, sample_data_fields)
             
-            value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            value = read_value_simple(config_path, data_field, sample_data_fields)
             assert value == 222, "Write should succeed after removing invalid (non-numeric) lock"
         finally:
             cleanup_locks(config_path)
@@ -1075,16 +1093,10 @@ class TestTTLMechanism:
         assert check_lock_exists(config_path), "Invalid lock should exist"
         
         try:
-            backend.write_value(
-                Data(name="counter", data_type=int, default=0),
-                333,
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            write_value_simple(config_path, data_field, 333, sample_data_fields)
             
-            value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            value = read_value_simple(config_path, data_field, sample_data_fields)
             assert value == 333, "Write should succeed after removing invalid (whitespace) lock"
         finally:
             cleanup_locks(config_path)
@@ -1184,10 +1196,8 @@ class TestTTLMechanism:
                 assert not p.is_alive(), f"Writer {i} should have completed"
             
             # Verify config is in valid state (no corruption)
-            final_value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            final_value = read_value_simple(config_path, data_field, sample_data_fields)
             
             # Final value should be one of the written values
             expected_values = [i * 100 for i in range(num_writers)]
@@ -1226,20 +1236,14 @@ class TestTTLMechanism:
         try:
             # Attempt write - should NOT block because >= treats boundary as stale
             start_time = time.time()
-            backend.write_value(
-                Data(name="counter", data_type=int, default=0),
-                777,
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            write_value_simple(config_path, data_field, 777, sample_data_fields)
             elapsed = time.time() - start_time
             
             # Write should complete quickly (lock treated as stale)
             assert elapsed < 2.0, "Write should not block on boundary-case lock (>= treats as stale)"
             
-            value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            value = read_value_simple(config_path, data_field, sample_data_fields)
             assert value == 777, "Write should succeed"
             
         finally:
@@ -1307,10 +1311,8 @@ class TestTTLEdgeCases:
                 assert not p.is_alive(), f"Writer {i} should have completed (no deadlock from race)"
             
             # Verify system is consistent
-            final_value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            final_value = read_value_simple(config_path, data_field, sample_data_fields)
             assert final_value in range(num_writers), "Final value should be valid"
             
             # Verify no lock remains
@@ -1353,20 +1355,14 @@ class TestTTLEdgeCases:
         
         # Verify _read_lock_timestamp_ms returns None for missing lock
         lock_path.unlink()  # Remove it
-        result = backend._read_lock_timestamp_ms(config_path)
-        assert result is None, "Should return None for missing lock file"
+        # Note: _read_lock_timestamp_ms is a private implementation detail
+        # We verify the observable behavior instead: write succeeds
         
         # Verify write succeeds even with vanishing lock
         try:
-            backend.write_value(
-                Data(name="counter", data_type=int, default=0),
-                999,
-                config_path
-            )
-            value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            write_value_simple(config_path, data_field, 999, sample_data_fields)
+            value = read_value_simple(config_path, data_field, sample_data_fields)
             assert value == 999, "Write should succeed despite lock race"
         finally:
             cleanup_locks(config_path)
@@ -1405,17 +1401,11 @@ class TestTTLEdgeCases:
             
             try:
                 # System should treat invalid content as stale and remove it
-                backend.write_value(
-                    Data(name="counter", data_type=int, default=0),
-                    500 + idx,
-                    config_path
-                )
+                data_field = Data(name="counter", data_type=int, default=0)
+                write_value_simple(config_path, data_field, 500 + idx, sample_data_fields)
                 
                 # Verify write succeeded
-                value = backend.read_value(
-                    Data(name="counter", data_type=int, default=0),
-                    config_path
-                )
+                value = read_value_simple(config_path, data_field, sample_data_fields)
                 assert value == 500 + idx, f"Write should succeed after removing invalid lock: {content}"
                 
             finally:
@@ -1439,11 +1429,8 @@ class TestTTLEdgeCases:
         initialize_config(config_path, sample_data_fields)
         
         # Initialize with known value
-        backend.write_value(
-            Data(name="counter", data_type=int, default=0),
-            100,
-            config_path
-        )
+        data_field = Data(name="counter", data_type=int, default=0)
+        write_value_simple(config_path, data_field, 100, sample_data_fields)
         
         # Create stale lock to simulate crashed writer
         make_stale_lock(config_path, ttl_seconds=10.0)
@@ -1491,10 +1478,8 @@ class TestTTLEdgeCases:
                 assert value in valid_values, f"Reader got invalid value: {value}"
             
             # Verify final state is valid
-            final_value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            final_value = read_value_simple(config_path, data_field, sample_data_fields)
             assert final_value in valid_values, "Final value should be valid"
             
             # Verify no lock remains
@@ -1537,11 +1522,8 @@ class TestTTLEdgeCases:
 
         try:
             start_time = time.time()
-            backend.write_value(
-                Data(name="counter", data_type=int, default=0),
-                999,
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            write_value_simple(config_path, data_field, 999, sample_data_fields)
             elapsed = time.time() - start_time
 
             # Should complete quickly because future timestamp is considered invalid/stale.
@@ -1550,10 +1532,8 @@ class TestTTLEdgeCases:
             # Lock should be gone after successful write (writer releases it).
             assert not check_lock_exists(config_path), "No lock should remain after write completes"
 
-            value = backend.read_value(
-                Data(name="counter", data_type=int, default=0),
-                config_path
-            )
+            data_field = Data(name="counter", data_type=int, default=0)
+            value = read_value_simple(config_path, data_field, sample_data_fields)
             assert value == 999, "Write should succeed after removing future-timestamp lock"
 
             # Ensure JSON is still parseable (no corruption)
@@ -1585,11 +1565,8 @@ class TestTTLEdgeCases:
         initialize_config(config_path, sample_data_fields)
 
         # First, write a known value with no lock present
-        backend.write_value(
-            Data(name="counter", data_type=int, default=0),
-            123,
-            config_path
-        )
+        data_field = Data(name="counter", data_type=int, default=0)
+        write_value_simple(config_path, data_field, 123, sample_data_fields)
 
         # Now create a future-timestamp lock (invalid)
         now_ms = int(time.time() * 1000)
@@ -1601,10 +1578,8 @@ class TestTTLEdgeCases:
 
         def _reader_task():
             try:
-                val = backend.read_value(
-                    Data(name="counter", data_type=int, default=0),
-                    config_path
-                )
+                data_field = Data(name="counter", data_type=int, default=0)
+                val = read_value_simple(config_path, data_field, sample_data_fields)
                 result_queue.put(("ok", val))
             except Exception as e:
                 result_queue.put(("err", repr(e)))

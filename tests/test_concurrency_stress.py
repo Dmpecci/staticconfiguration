@@ -92,12 +92,25 @@ def initialize_stress_config(config_path: Path, num_fields: int) -> List[Data]:
     """
     Initialize a config file with N fields for stress testing.
     
+    Uses write_value which automatically initializes the file via _ensure_safe_state.
+    
     Returns:
         The schema (list of Data fields) used for initialization
     """
     backend = JSONBackend()
     schema = generate_schema(num_fields)
-    backend.ensure_safe_state(config_path, "1.0.0", schema, development=False)
+    # Write one field to trigger initialization - _ensure_safe_state is called internally
+    # This creates the file with all defaults
+    if schema:
+        backend.write_value(
+            data=schema[0],
+            new_value=schema[0].default,
+            config_path=config_path,
+            version="1.0.0",
+            data_fields=schema,
+            development=False,
+            concurrency_unsafe=True  # Safe since we're initializing
+        )
     return schema
 
 
@@ -314,7 +327,14 @@ def concurrent_reader_worker(config_path: Path, schema: List[Data], iterations: 
             random_field = random.choice(schema)
             
             try:
-                value = backend.read_value(random_field, config_path)
+                value = backend.read_value(
+                    data=random_field,
+                    config_path=config_path,
+                    version="1.0.0",
+                    data_fields=schema,
+                    development=False,
+                    concurrency_unsafe=False
+                )
                 success_count += 1
             except Exception as e:
                 operation_time = time.perf_counter() - start_time
@@ -374,7 +394,15 @@ def concurrent_writer_worker(config_path: Path, schema: List[Data], iterations: 
             random_value = random.randint(-2**31, 2**31 - 1)
             
             try:
-                backend.write_value(random_field, random_value, config_path)
+                backend.write_value(
+                    data=random_field,
+                    new_value=random_value,
+                    config_path=config_path,
+                    version="1.0.0",
+                    data_fields=schema,
+                    development=False,
+                    concurrency_unsafe=False
+                )
                 success_count += 1
             except Exception as e:
                 operation_time = time.perf_counter() - start_time
@@ -433,7 +461,14 @@ def mixed_worker(config_path: Path, schema: List[Data], read_iterations: int, wr
             if i < read_iterations:
                 random_field = random.choice(schema)
                 try:
-                    backend.read_value(random_field, config_path)
+                    backend.read_value(
+                        data=random_field,
+                        config_path=config_path,
+                        version="1.0.0",
+                        data_fields=schema,
+                        development=False,
+                        concurrency_unsafe=False
+                    )
                     read_success += 1
                 except Exception as e:
                     operation_time = time.perf_counter() - start_time
@@ -458,7 +493,15 @@ def mixed_worker(config_path: Path, schema: List[Data], read_iterations: int, wr
                 random_field = random.choice(schema)
                 random_value = random.randint(-2**31, 2**31 - 1)
                 try:
-                    backend.write_value(random_field, random_value, config_path)
+                    backend.write_value(
+                        data=random_field,
+                        new_value=random_value,
+                        config_path=config_path,
+                        version="1.0.0",
+                        data_fields=schema,
+                        development=False,
+                        concurrency_unsafe=False
+                    )
                     write_success += 1
                 except Exception as e:
                     operation_time = time.perf_counter() - start_time
@@ -1385,11 +1428,26 @@ def test_stress_smoke_test_all_sizes(temp_config_dir):
         field = Data(name="field_00000", data_type=int, default=0)
         
         read_start = time.perf_counter()
-        value = backend.read_value(field, config_path)
+        value = backend.read_value(
+            data=field,
+            config_path=config_path,
+            version="1.0.0",
+            data_fields=schema,
+            development=False,
+            concurrency_unsafe=False
+        )
         read_time = time.perf_counter() - read_start
         
         write_start = time.perf_counter()
-        backend.write_value(field, 999, config_path)
+        backend.write_value(
+            data=field,
+            new_value=999,
+            config_path=config_path,
+            version="1.0.0",
+            data_fields=schema,
+            development=False,
+            concurrency_unsafe=False
+        )
         write_time = time.perf_counter() - write_start
         
         is_valid, error_msg = verify_json_integrity(config_path)
