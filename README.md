@@ -116,6 +116,46 @@ The `Data` objects declared in the class represent **schema metadata** (name, ty
 
 This focus on correctness prevents common issues such as lost updates, torn writes, and inconsistent reads.
 
+## Testing
+
+The project includes a comprehensive test suite:
+
+- **104 functional tests**: Validate correctness, concurrency, persistence, and edge cases
+- **13 stress tests**: Exploratory performance and load testing
+
+### Running Tests
+
+```bash
+# Run all functional tests (default)
+pytest tests/
+
+# Run only functional tests (explicit)
+pytest tests/ -m "not stress"
+
+# Run stress/performance tests (manual only, not for CI)
+pytest tests/ -m stress
+
+# Run specific test file
+pytest tests/test_concurrency.py -v
+
+# Run with coverage
+pytest tests/ --cov=staticconfiguration --cov-report=html
+```
+
+### Stress Tests
+
+Stress tests are marked with `@pytest.mark.stress` and are **excluded by default**. They test:
+
+- Large payload sizes (10, 100, 1000, 10000 fields)
+- Concurrent readers and writers
+- Mixed read/write workloads
+- High contention scenarios
+- Performance characteristics under load
+
+See [`docs/test_reports/internal/STRESS_TESTING_REPORT.md`](docs/test_reports/internal/STRESS_TESTING_REPORT.md) for detailed results.
+
+---
+
 ## Why This Exists (Compared to Existing Solutions)
 
 This project is not a replacement for:
@@ -129,9 +169,8 @@ It is intended for applications where:
 - Configuration is global by nature
 - Multiple independent subsystems need access
 - Configuration should be persistent and structured
-
 - Configuration changes must be persisted reliably and safely
-- Concurrent access must not corrupt configuration or produce inconsistent reads (See <attachments> above for file contents. You may not need to search or read the file again.)
+- Concurrent access must not corrupt configuration or produce inconsistent reads
 
 Simplicity and explicitness matter more than flexibility.
 

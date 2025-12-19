@@ -152,6 +152,7 @@ class JSONBackend:
                 migrated_payload = ConfigPayloadMigrator.migrate_payload(payload, version, data_fields)
                 write_payload(migrated_payload)
             except (json.JSONDecodeError, OSError): # json definitely corrupted, rewrite defaults
+                #raise Exception("Configuration file is corrupted; rewriting with default values.")
                 write_payload(build_default_payload())
             finally:
                 self.release_lock(config_path)       
