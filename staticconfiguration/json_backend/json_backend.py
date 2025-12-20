@@ -1,3 +1,8 @@
+# Copyright (c) 2025 David Muñoz Pecci
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 """
 Responsibility:
     - Provide a simple JSON file-based backend to store and retrieve structured
@@ -49,7 +54,7 @@ class JSONBackend:
     _LOCK_TTL_SECONDS: float = 10.0
 
     @staticmethod
-    def read_value(data: Data, config_path: Path, version: str, data_fields: list[Data], development: bool, concurrency_unsafe: bool) -> object | None:
+    def read_value(data: Data, config_path: Path, version: str, data_fields: list[Data], development: bool, concurrency_unsafe: bool = False) -> object | None:
         """
         Read and decode the value of a configuration key from JSON.
 
@@ -75,6 +80,8 @@ class JSONBackend:
             data_fields (list[Data]): List of Data descriptors for fields to
                 initialize with their default values.
             development (bool): If True, forces migration even if versions match.
+            concurrency_unsafe (bool): If True, operations will be unsafe for
+                concurrent access. Default is False. Data integrity may be compromised. Use with caution.
 
         Returns:
             object | None: Decoded value corresponding to the ``data`` field,
@@ -101,7 +108,7 @@ class JSONBackend:
         return data.data_type(raw_value)
 
     @staticmethod
-    def write_value(data: Data, new_value, config_path: Path, version: str, data_fields: list[Data], development: bool, concurrency_unsafe: bool) -> None:
+    def write_value(data: Data, new_value, config_path: Path, version: str, data_fields: list[Data], development: bool, concurrency_unsafe: bool = False) -> None:
         """
         Write or update the value of a field in the JSON configuration file.
 
@@ -129,6 +136,8 @@ class JSONBackend:
             data_fields (list[Data]): List of Data descriptors for fields to
                 initialize with their default values.
             development (bool): If True, forces migration even if versions match.
+            concurrency_unsafe (bool): If True, operations will be unsafe for
+                concurrent access. Default is False. Data integrity may be compromised. Use with caution.
 
         Returns:
             None: Does not return a value; persists the new state to disk.
@@ -143,6 +152,8 @@ class JSONBackend:
             payload = JSONBackend._ensure_safe_state(config_path, version, data_fields, development)
             
             if data.name not in payload["data"]:
+                # It shouldn't happen if ensure_safe_state works correctly
+                # Since we access with an explicit existent key in the class that inherits StaticConfigBase, 
                 raise KeyError(f"Key '{data.name}' not found in configuration file.")
 
             encoded_value = data.encoder(new_value) if (data.encoder and new_value is not None) else new_value

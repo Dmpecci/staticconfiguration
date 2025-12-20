@@ -1,9 +1,13 @@
 [project]
 name = "staticconfiguration"
-version = "0.1.0"
-description = "Herramienta para crear configuraciones globales, instancias estáticas"
+version = "1.0.0"
+description = "Strongly-typed, persistent global configuration for DI edge cases in single-machine applications."
 authors = [
-    { name = "David Muñoz Pecci" }
+    { name = "David Muñoz Pecci", email = "davidmpe2002@gmail.com" }
+]
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
 ]
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,8 +25,12 @@ dev = [
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["staticconfiguration*"]
+exclude = ["tests*", "docs*"]
+
 [tool.pytest.ini_options]
-addopts = "-m 'not slow and not stress'"
+addopts = "-m not slow and not stress"
 markers = [
     "stress: marks tests as stress/performance tests (deselect with '-m \"not stress\"')",
     "slow: marks tests that are slow to run (deselect with '-m \"not slow\"')"

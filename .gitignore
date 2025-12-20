@@ -6,6 +6,5 @@ __pycache__/
 plantilla_docstrings.md
 .vscode/
 .coverage
-docs/
 .venv/
 staticconfiguration.egg-info
