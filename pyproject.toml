@@ -30,8 +30,8 @@ include = ["staticconfiguration*"]
 exclude = ["tests*", "docs*"]
 
 [tool.pytest.ini_options]
-addopts = "-m not slow and not stress"
+addopts = ["-m", "not slow and not stress"]
 markers = [
-    "stress: marks tests as stress/performance tests (deselect with '-m \"not stress\"')",
-    "slow: marks tests that are slow to run (deselect with '-m \"not slow\"')"
+    "stress: marks stress/performance tests",
+    "slow: marks slow-running tests",
 ]
