@@ -44,7 +44,8 @@ class ConfigPayloadMigrator:
 
     @staticmethod
     def migrate_payload(payload: dict, version: str, data_fields: list[Data]) -> dict:
-        """Migrate a configuration payload to a new schema version with normalized structure.
+        """
+        Migrate a configuration payload to a new schema version with normalized structure.
 
         Responsibility:
             - Reconstruct the data dictionary deterministically from the field schema.

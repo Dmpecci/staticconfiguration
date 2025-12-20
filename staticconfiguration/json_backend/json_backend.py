@@ -22,6 +22,7 @@ import warnings
 import os
 from staticconfiguration.exceptions.configuration_reset_warning import ConfigurationResetWarning
 from psutil import pid_exists
+import shutil
 
 class JSONBackend:
     """
@@ -282,6 +283,17 @@ class JSONBackend:
                 payload = migrate_payload(payload)
             return
         except (json.JSONDecodeError, OSError): # .json corrupted, restore defaults
+            # Backup the corrupted file before resetting
+            try:
+                if config_path.exists():
+                    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+                    backup_name = f"{config_path.stem}_{timestamp}.json.corruptedbackup"
+                    backup_path = config_path.with_name(backup_name)
+                    shutil.copy2(config_path, backup_path)
+            except Exception:
+                # Best-effort backup: never block recovery
+                pass
+
             JSONBackend._write_payload(build_default_payload(), config_path)
             payload = None
             warnings.warn(

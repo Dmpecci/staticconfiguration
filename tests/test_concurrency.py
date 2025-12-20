@@ -493,13 +493,19 @@ class TestConcurrentReads:
             
             # Collect all results
             results = []
+            errors = []
             while not result_queue.empty():
                 status, value = result_queue.get()
-                assert status == "success"
-                results.append(value)
+                if status == "success":
+                    results.append(value)
+                else:
+                    errors.append(value)
+            
+            # Check for errors first
+            assert len(errors) == 0, f"Read errors occurred: {errors}"
             
             # All readers should get the same value
-            assert len(results) == num_readers
+            assert len(results) == num_readers, f"Expected {num_readers} results, got {len(results)}"
             assert all(v == 42 for v in results), "All readers should read same value"
         finally:
             for p in processes:
