@@ -21,6 +21,7 @@ from staticconfiguration.json_backend.config_payload_migrator import ConfigPaylo
 import warnings
 import os
 from staticconfiguration.exceptions.configuration_reset_warning import ConfigurationResetWarning
+from psutil import pid_exists
 
 class JSONBackend:
     """
@@ -418,8 +419,6 @@ class JSONBackend:
         """
         Determine whether the lock for ``config_file`` is stale.
 
-        Note:
-
         Responsibility:
             - Decide if the existing lock should be considered expired.
             - The principal criteria for staleness are:
@@ -427,6 +426,8 @@ class JSONBackend:
                     This is the principal mechanism to avoid deadlocks.
                 - The process that created the lock no longer exists.
                     We check via PID existence, as secondary mechanism.
+            - As fallback, if the lock file is corrupt, we check its modification
+              time against the TTL.
 
         Contracts:
             Preconditions:
@@ -447,10 +448,18 @@ class JSONBackend:
             pid = int(pid_str)
             created = float(created_str)
         except Exception:
-            return True  # lock corrupto = stale
+            # NOTE:
+            # In case of a corrupted lock file, we fall back to filesystem metadata (mtime).
+            # This relies on wall-clock time and may theoretically misbehave if the system
+            # clock is changed at the exact moment a corrupt lock appears.
+            #
+            # This scenario is considered astronomically unlikely and is preferable to
+            # risking an unrecoverable deadlock. If a user ever encounters this edge case,
+            # congratulations: you have won the concurrency lottery.
+            age = time.time() - lock_path.stat().st_mtime
+            return (age > JSONBackend._LOCK_TTL_SECONDS)
         
         lifetime = time.monotonic() - created
-
         if lifetime > JSONBackend._LOCK_TTL_SECONDS:
             return True
 
@@ -464,14 +473,6 @@ class JSONBackend:
         """
         Check if a process with the given PID exists.
 
-        Note:
-            We need to know exactly if the process does NOT exist, we can't have false positives.
-            However, we can afford false negatives.
-            This is because if we detect a false positive, we delete a lock that is still valid,
-            which can lead to data corruption.
-            On the other hand, if we detect a false negative, we just wait longer to acquire the lock, by
-            TTL mechanism.
-
         Responsibility:
             - Determine if a process with the specified PID is currently running.
         Contracts:
@@ -479,25 +480,19 @@ class JSONBackend:
                 - ``pid`` is a positive integer representing a process ID.
             Postconditions:
                 - Returns True if the process exists; False otherwise.
-                - We assure non-existence, but existence is not 100% guaranteed, 
-                    especially in Windows.
+
             Args:
                 pid (int): Process ID to check.
 
             Returns:
                 bool: True if the process exists; False otherwise.
-        """
-        if pid <= 0:
-            return False
+            """
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
+            return pid_exists(pid)
+        except Exception:
+            # Any unexpected failure → be conservative
             return True
-        else:
-            return True
-    
+        
     @staticmethod
     def _break_stale_lock(lock_path) -> bool:
         """
