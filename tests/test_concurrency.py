@@ -52,7 +52,6 @@ import multiprocessing
 import pytest
 import time
 import os
-import signal
 from pathlib import Path
 from datetime import datetime
 import tempfile
@@ -493,17 +492,11 @@ class TestConcurrentReads:
             
             # Collect all results
             results = []
-            errors = []
             while not result_queue.empty():
                 status, value = result_queue.get()
                 if status == "success":
                     results.append(value)
-                else:
-                    errors.append(value)
-            
-            # Check for errors first
-            assert len(errors) == 0, f"Read errors occurred: {errors}"
-            
+                       
             # All readers should get the same value
             assert len(results) == num_readers, f"Expected {num_readers} results, got {len(results)}"
             assert all(v == 42 for v in results), "All readers should read same value"
@@ -609,16 +602,11 @@ class TestReadWriteInteraction:
             
             # All readers should get the new value
             results = []
-            errors = []
             while not result_queue.empty():
                 status, value = result_queue.get()
                 if status == "success":
                     results.append(value)
-                else:
-                    errors.append(value)
-            
-            # Report any errors for debugging
-            assert len(errors) == 0, f"Reader errors occurred: {errors}"
+
             assert len(results) == num_readers, f"Expected {num_readers} results, got {len(results)}"
             assert all(v == 777 for v in results), "All readers must see final value"
         finally:
@@ -682,15 +670,11 @@ class TestStressScenarios:
             
             # All reads should succeed
             read_count = 0
-            errors = []
             while not result_queue.empty():
                 status, payload = result_queue.get()
                 if status == "success":
                     read_count += 1
-                else:
-                    errors.append(payload)
 
-            assert not errors, f"Reads failed ({len(errors)}): {errors[:10]}"
             assert read_count == num_readers, f"Expected {num_readers} reads, got {read_count}"
             assert read_count == num_readers, "All readers should complete"
         finally:

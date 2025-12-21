@@ -3,6 +3,60 @@
 A Python library for declarative, persistent, and type-safe configuration with static access semantics. Designed for the small subset of application state that is genuinely global, needs early availability, and must persist across sessions.
 
 ---
+## Introduction
+
+This project started while I was developing a DAW.
+
+At first, everything was clean and reasonable.  
+I was passing configuration values through dependency injection: sample rate, buffer size, engine flags. The “correct” way. Calm, explicit, well-structured.
+
+Then a simple question appeared:
+
+**How do I make the same value available to the UI, the audio engine, and several other subsystems at the same time?**
+
+The obvious answer was: *keep passing it through DI*.
+
+And that is where things started to go wrong.
+
+Method signatures became noisy.  
+Classes that did not conceptually care about audio settings now had to receive them.  
+Objects existed only to forward configuration to somewhere else.  
+The dependency graph kept growing, while the number of places that actually *used* the value stayed small.
+
+It worked — but it felt wrong.
+
+So I thought:  
+*What if I just make it global?*
+
+A `settings.py`.  
+Or a JSON file, so when the app restarts, everything stays exactly as the user left it.
+
+And immediately, new problems appeared.
+
+What about concurrency?  
+What happens if the UI writes while the engine reads?  
+What happens when the schema changes in a future version?  
+What happens when I add a new field?  
+What happens when something goes wrong and the file gets corrupted?
+
+This is the classic global state problem:  
+it works today, and tomorrow you spend the whole day debugging it.
+
+Going back to DI did not really solve it either.  
+It just hid the global nature of the problem behind more plumbing, more dependencies, and more complexity than the problem itself justified.
+
+At that point, one thing became clear:
+
+**Some state is inherently global.**
+
+Pretending otherwise does not make it safer — it just makes it harder to reason about.
+
+So the real question was not *“how do I avoid global state?”*  
+The real question was:
+
+**How do I make global state safe?**
+
+In that moment, i created a new project, this repository is my answer to that question.
 
 ## Motivation
 
@@ -148,6 +202,9 @@ class AppSettings:
 current_timeout = AppSettings.get(AppSettings.timeout)
 print(current_timeout)  # 30 (or current persisted value)
 ```
+This operation reads from disk directly, we have not memory cache, and won't be implemented ever, doing so, it will reintroduce the bad global state this library is trying to avoid at all cost. You could try making a reliable cache, with cache invalidations, and some mechanisms but it is just overkill, and overengineering, out of scope for this problem.
+
+In some specific cases (not bugs, It's a feature), it can change the json structure, but only in migrations, and development mode active. see [Schema Evolution and Migration](#schema-evolution-and-migration) for more info.
 
 ### Writing Values
 
@@ -157,6 +214,8 @@ AppSettings.set(AppSettings.timeout, 60)
 
 # Value is immediately persisted to disk
 ```
+This function will update the value of a specific field directly on disk.
+Same as get, if needed, It will migrate the schema.
 
 ### Type Safety
 
@@ -222,24 +281,17 @@ Configuration is stored as JSON:
 
 ### Concurrency Model
 
-By default, all reads and writes acquire an exclusive file lock:
+All reads and writes acquire an exclusive file lock:
 
-- **Write operations** are serialized. Multiple processes attempting to write will queue.
+- **Write operations** are serialized. Multiple processes attempting to write will wait.
 - **Read operations** acquire the lock to ensure they do not read partial writes.
 - **Lock mechanism**: File-based lock with PID and timestamp. Lock files are automatically broken after 10 seconds (TTL) or when the owning process no longer exists.
 
 This design prioritizes correctness over latency. Under high contention, operations may be delayed but will not corrupt data.
 
-### Atomic Writes
+If an indicator of mutual exclusion is broken, like attempting to release a lock not held by himself, or that doesn't exists, it will fail inmediatly, raising an RuntimeError.
 
-Writes use a temporary file and atomic rename:
-
-```
-1. Write to config.json.tmp
-2. Atomically replace config.json with config.json.tmp
-```
-
-This ensures readers never see partial writes, even if the writing process crashes mid-write.
+Starvation is not explicitly prevented or detected. Under heavy contention, a process may wait indefinitely for the lock, although this is rare in practice. Order of operations are not guaranteed. In the use case of this library, it won't be a problem, if you make a lot of concurrent calls, you must know order and priority of process is not handled.
 
 ---
 
@@ -267,7 +319,9 @@ warnings.simplefilter("always", ConfigurationResetWarning)
 value = AppSettings.get(AppSettings.timeout)  # Returns default value
 ```
 
-The library does not attempt to repair corrupted JSON. It assumes the file is unrecoverable and resets to a known good state.
+The library does not attempt to repair corrupted JSON. The file is unrecoverable (without manual intervention), and resets to default values given in the schema.
+
+If you want to make it fail-fast, capture that warning, and raise an error yourself. Default behaviour, just a warning, the final user will prefer a configuration-reset, than a unusable UI. If you think otherwise, capture the warning and raise error.
 
 ---
 
@@ -294,7 +348,7 @@ class AppSettings:
 ``__version__`` is a free string, format is whatever the developer wants, it justs checks if the strings are equal, doesn't have an increasing or decreasing version detection, if the class version differs from the .json file version, it automatically migrates. 
 It is recommended that you update it when you actually change the schema, then, the final user's app, when detecting a different version, will automatically update their configurations, making distribution of new updates easier, without complex logic, or ad-hoc rules.
 
-You are free to update version every update you do, but if you don't actually change the schema, it's like doing nothing, just an unnecessary migration for the final user.
+You are free to update version every change you do, but if you don't actually change the schema, it's like doing nothing, just an unnecessary migration for the final user.
 
 On the next read or write, the library will automatically:
 
@@ -318,7 +372,7 @@ class AppSettings:
 This is really useful during active development, when you try different schemas, change data types, you won't have to change every run the `__version__` string.
 This forces migration on every access, even if `__version__` has not changed.
 
-**Do not use `__development__ = True` in production.** If you push to production branch with this flag active, your final users will be migrating the schema every operation get/set is done.
+**Do not use `__development__ = True` in production.** If you push to production branch with this flag active, your final users will be migrating the schema every operation get/set is done. It won't break anything, but is extra latency not needed.
 
 ---
 
@@ -358,6 +412,12 @@ Do NOT use when:
 - Multiple processes may access the configuration.
 - Multiple instances of the application can run simultaneously.
 - You are not 100% sure.
+
+If you forget there is an activated footgun flag in your code, a warning will be raised to advise you, just in case yo forgot.
+
+```bash
+concurrency_unsafe=True: You are bypassing all concurrency protections. Data corruption is possible.
+```
 
 This flag exists deliberately.  
 You are given the power — but with great power comes great responsibility.

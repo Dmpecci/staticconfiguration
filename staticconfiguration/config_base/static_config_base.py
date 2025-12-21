@@ -23,6 +23,7 @@ from pathlib import Path
 from .static_config_interface import StaticConfigInterface
 from ..entities import Data
 from ..json_backend.json_backend import JSONBackend
+import warnings
 
 class StaticConfigBase(StaticConfigInterface):
     """
@@ -80,6 +81,13 @@ class StaticConfigBase(StaticConfigInterface):
             >>> MyConfig.get(MyConfig.timeout)
             30
         """
+
+        if concurrency_unsafe:
+            warnings.warn(
+                "concurrency_unsafe=True: You are bypassing all concurrency protections. Data corruption is possible.",
+                UserWarning
+            )        
+
         data_fields = cls._get_data_fields()
 
         data = cls._resolve_data_field(data_field, data_fields)
@@ -127,6 +135,13 @@ class StaticConfigBase(StaticConfigInterface):
         Example:
             >>> MyConfig.set(MyConfig.timeout, 60)
         """
+
+        if concurrency_unsafe:
+            warnings.warn(
+                "concurrency_unsafe=True: You are bypassing all concurrency protections. Data corruption is possible.",
+                UserWarning
+            )    
+            
         data_fields = cls._get_data_fields()
 
         data = cls._resolve_data_field(data_field, data_fields)
