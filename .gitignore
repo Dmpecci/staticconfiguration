@@ -11,3 +11,4 @@ staticconfiguration.egg-info
 docs/docs/build/
 docs/docs/build/**
 _build/
+dist/

@@ -1,19 +1,37 @@
 [project]
 name = "staticconfiguration"
 version = "1.0.0"
-description = "Strongly-typed, persistent global configuration for DI edge cases in single-machine applications."
+description = "Strongly typed, persistent global configuration for single-machine Python applications."
 authors = [
     { name = "David Muñoz Pecci", email = "davidmpe2002@gmail.com" }
 ]
-license = { file = "LICENSE" }
+
+license = "MPL-2.0"
+license-files = ["LICENSE"]
+
 classifiers = [
-    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 readme = "README.md"
 requires-python = ">=3.10"
+
 dependencies = [
     "psutil>=7.1.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Dmpecci/staticconfiguration"
+Repository = "https://github.com/Dmpecci/staticconfiguration"
+Issues = "https://github.com/Dmpecci/staticconfiguration/issues"
+Documentation = "https://staticconfiguration.readthedocs.io"
 
 [project.optional-dependencies]
 dev = [
