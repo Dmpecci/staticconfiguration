@@ -8,3 +8,6 @@ plantilla_docstrings.md
 .coverage
 .venv/
 staticconfiguration.egg-info
+docs/docs/build/
+docs/docs/build/**
+_build/

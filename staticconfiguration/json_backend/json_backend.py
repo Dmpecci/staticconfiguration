@@ -33,22 +33,24 @@ class JSONBackend:
     """
     Backend for JSON persistence of static configurations.
 
-    Responsibility:
-        - Handle initial creation of the JSON configuration file, as well as
-          reading and writing individual values.
+    .. code-block:: text
 
-    Contracts:
-        Invariants:
-            - No method modifies paths other than those provided by its arguments.
-        Preconditions:
-            - ``config_path`` must be a pathlib.Path pointing to the file or the
-              location where it will be created.
-            - ``data_fields`` is a valid list of Data describing fields and
-              possible associated encoder/decoder.
-        Postconditions:
-            - After ``ensure_safe_state``, a JSON file exists with keys
-              ``version``, ``created``, ``last_modified``, and ``data`` and 
-               is structurally operable when preconditions are met.
+        Responsibility:
+            - Handle initial creation of the JSON configuration file, as well as
+            reading and writing individual values.
+
+        Contracts:
+            Invariants:
+                - No method modifies paths other than those provided by its arguments.
+            Preconditions:
+                - ``config_path`` must be a pathlib.Path pointing to the file or the
+                location where it will be created.
+                - ``data_fields`` is a valid list of Data describing fields and
+                possible associated encoder/decoder.
+            Postconditions:
+                - After ``ensure_safe_state``, a JSON file exists with keys
+                ``version``, ``created``, ``last_modified``, and ``data`` and 
+                is structurally operable when preconditions are met.
     """
     _SLEEP_INTERVAL: float = 0.05
     _LOCK_TTL_SECONDS: float = 10.0

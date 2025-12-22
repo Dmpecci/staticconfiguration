@@ -184,21 +184,13 @@ def staticconfig(cls: type) -> type:
     Example:
         >>> @staticconfig
         >>> class AppConfig:
+        >>>     __config_path__ = "~/.config/myapp"
         >>>     __config_file__ = "app.json"
         >>>     __version__ = "1.0.0"
         >>>     __development__ = False
-        >>>     __config_path__ = "~/.config/myapp"
         >>>     timeout = Data(name="timeout", data_type=int, default=30)
     """
     _verify_required_attributes(cls)
     _verify_data_fields(cls)
 
     return _inject_config_base_inheritance(cls)
-
-__all__ = [
-    "staticconfig",
-    "decorate_settings_class",
-    "_verify_required_attributes",
-    "_verify_data_fields",
-    "_inject_config_base_inheritance",
-]
