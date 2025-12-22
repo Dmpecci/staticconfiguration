@@ -379,6 +379,7 @@ class JSONBackend:
         now = time.monotonic()
 
         payload = f"{pid}:{now}"
+        os.makedirs(lock_path.parent, exist_ok=True)
 
         while True:
             try:
