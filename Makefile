@@ -8,4 +8,4 @@ test-slow:
 	pytest -m slow
 
 test-stress:
-	pytest -m stress
+	pytest -m stress -v -s
