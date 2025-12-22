@@ -129,7 +129,7 @@ Each of these points is documented in detail in the documentation.
 
 The complete documentation is available on Read the Docs:
 
-**https://staticconfiguration.readthedocs.io**
+**https://staticconfiguration.readthedocs.io/**
 
 Key sections:
 
