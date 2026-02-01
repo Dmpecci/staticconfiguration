@@ -142,8 +142,30 @@ class ConfigPayloadMigrator:
             Any: The resolved and optionally encoded value, or `None` if the value is null.
         """
         # Explicit null: preserve
+
         if raw_value is None:
             return None
+        
+        # Decoder-driven validation (bugfix)
+        if field.decoder:
+            try:
+                decoded = field.decoder(raw_value)
+
+                # Semantic validation: decoded object must belong to expected domain
+                if isinstance(decoded, field.data_type):
+                    return raw_value
+
+                # Decoder returned something unexpected → fallback to default
+                value = field.default
+                if value is None:
+                    return None
+                return field.encoder(value) if field.encoder else value
+
+            except Exception:
+                value = field.default
+                if value is None:
+                    return None
+                return field.encoder(value) if field.encoder else value
 
         # Exact type match (avoids bool/int subclass surprises).
         if type(raw_value) is field.data_type:

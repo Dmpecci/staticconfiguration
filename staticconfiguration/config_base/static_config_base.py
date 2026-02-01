@@ -92,9 +92,8 @@ class StaticConfigBase(StaticConfigInterface):
 
         data = cls._resolve_data_field(data_field, data_fields)
         config_path = Path(cls.__config_path__).expanduser() / cls.__config_file__
-        backend = JSONBackend()
 
-        return backend.read_value(data, config_path, cls.__version__, list(data_fields.values()), cls.__development__, concurrency_unsafe)
+        return JSONBackend.read_value(data, config_path, cls.__version__, list(data_fields.values()), cls.__development__, concurrency_unsafe)
     
     @classmethod
     def set(cls, data_field: Data, new_value: object, concurrency_unsafe: bool = False) -> None:
@@ -146,7 +145,7 @@ class StaticConfigBase(StaticConfigInterface):
 
         data = cls._resolve_data_field(data_field, data_fields)
 
-        if not isinstance(new_value, data.data_type):
+        if not isinstance(new_value, data.data_type) and new_value is not None:
             raise TypeError(f"Value for {data.name!r} must be of type {data.data_type.__name__}")
 
         config_path = Path(cls.__config_path__).expanduser() / cls.__config_file__
