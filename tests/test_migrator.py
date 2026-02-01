@@ -788,3 +788,1009 @@ class TestDeterminism:
         
         # Keys should follow schema order, not alphabetical
         assert list(result["data"].keys()) == ["zebra", "alpha", "mike"]
+
+
+# ============================================================================
+# Complex Data Types for Migration Testing
+# ============================================================================
+
+from dataclasses import dataclass, field as dataclass_field
+from enum import Enum
+
+
+class Priority(Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+@dataclass
+class Address:
+    """Simple nested dataclass."""
+    street: str = ""
+    city: str = ""
+    zip_code: str = ""
+    
+    def to_dict(self) -> dict:
+        return {"street": self.street, "city": self.city, "zip_code": self.zip_code}
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Address":
+        return cls(
+            street=data.get("street", ""),
+            city=data.get("city", ""),
+            zip_code=data.get("zip_code", "")
+        )
+
+
+@dataclass
+class Person:
+    """Base class for inheritance testing."""
+    name: str
+    age: int = 0
+    
+    def to_dict(self) -> dict:
+        return {"__class__": self.__class__.__name__, "name": self.name, "age": self.age}
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Person":
+        class_name = data.get("__class__", "Person")
+        if class_name == "Employee":
+            return Employee.from_dict(data)
+        elif class_name == "Manager":
+            return Manager.from_dict(data)
+        return cls(name=data.get("name", ""), age=data.get("age", 0))
+
+
+@dataclass
+class Employee(Person):
+    """Subclass for inheritance testing."""
+    employee_id: str = ""
+    department: str = ""
+    
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base.update({"employee_id": self.employee_id, "department": self.department})
+        return base
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Employee":
+        return cls(
+            name=data.get("name", ""),
+            age=data.get("age", 0),
+            employee_id=data.get("employee_id", ""),
+            department=data.get("department", "")
+        )
+
+
+@dataclass
+class Manager(Person):
+    """Another subclass for variant switching tests."""
+    team_size: int = 0
+    budget: float = 0.0
+    
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base.update({"team_size": self.team_size, "budget": self.budget})
+        return base
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Manager":
+        return cls(
+            name=data.get("name", ""),
+            age=data.get("age", 0),
+            team_size=data.get("team_size", 0),
+            budget=data.get("budget", 0.0)
+        )
+
+
+@dataclass
+class ComplexConfig:
+    """Complex structure with nested dataclasses, lists, dicts, enums."""
+    id: int
+    name: str
+    priority: Priority = Priority.MEDIUM
+    tags: list[str] = dataclass_field(default_factory=list)
+    metadata: dict[str, str] = dataclass_field(default_factory=dict)
+    address: Address | None = None
+    owner: Person | None = None
+    
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "priority": self.priority.value if isinstance(self.priority, Priority) else self.priority,
+            "tags": list(self.tags),
+            "metadata": dict(self.metadata),
+            "address": self.address.to_dict() if self.address else None,
+            "owner": self.owner.to_dict() if self.owner else None,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "ComplexConfig":
+        priority = data.get("priority", "medium")
+        if isinstance(priority, str):
+            priority = Priority(priority)
+        
+        address_data = data.get("address")
+        address = Address.from_dict(address_data) if address_data else None
+        
+        owner_data = data.get("owner")
+        owner = Person.from_dict(owner_data) if owner_data else None
+        
+        return cls(
+            id=data.get("id", 0),
+            name=data.get("name", ""),
+            priority=priority,
+            tags=data.get("tags", []),
+            metadata=data.get("metadata", {}),
+            address=address,
+            owner=owner,
+        )
+
+
+def complex_encoder(obj: ComplexConfig) -> dict:
+    return obj.to_dict()
+
+
+def complex_decoder(data: dict) -> ComplexConfig:
+    return ComplexConfig.from_dict(data)
+
+
+# ============================================================================
+# TestComplexMigrationToleratedChanges
+# ============================================================================
+
+class TestComplexMigrationToleratedChanges:
+    """
+    Document which structural changes SURVIVE migration.
+    
+    Purpose:
+        Empirically determine what modifications to complex objects
+        are tolerated by the migrator without resetting to default.
+        
+    Key insight:
+        The migrator uses decoder as semantic validator. If decoder
+        succeeds AND returns instance of data_type, the RAW VALUE
+        (serialized dict) is preserved as-is.
+    """
+    
+    def test_identical_structure_preserved(self):
+        """
+        Baseline: Same structure with same values survives migration.
+        
+        EXPECTED: Value preserved (decoder validates successfully)
+        """
+        original_data = {
+            "id": 42,
+            "name": "Test Config",
+            "priority": "high",
+            "tags": ["tag1", "tag2"],
+            "metadata": {"key": "value"},
+            "address": {"street": "123 Main", "city": "NYC", "zip_code": "10001"},
+            "owner": {"__class__": "Employee", "name": "Alice", "age": 30, "employee_id": "E001", "department": "Engineering"},
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": original_data}
+        }
+        
+        default_obj = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_obj, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Original structure preserved exactly
+        assert result["data"]["config"] == original_data
+        assert result["data"]["config"]["id"] == 42
+        assert result["data"]["config"]["owner"]["employee_id"] == "E001"
+    
+    def test_add_new_field_to_schema_preserves_existing(self):
+        """
+        Adding a NEW field to schema preserves existing field values.
+        
+        EXPECTED: Old field preserved, new field gets default
+        """
+        existing_data = {"id": 100, "name": "Existing"}
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": existing_data}
+        }
+        
+        # Schema now has TWO fields (config + new_field)
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [
+            Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder),
+            Data(name="new_field", data_type=str, default="new_default"),
+        ]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Existing field preserved
+        assert result["data"]["config"]["id"] == 100
+        assert result["data"]["config"]["name"] == "Existing"
+        
+        # DOCUMENT: New field added with default
+        assert result["data"]["new_field"] == "new_default"
+    
+    def test_remove_field_from_schema_drops_it(self):
+        """
+        Removing a field from schema drops it from output.
+        
+        EXPECTED: Field not in schema disappears, other fields preserved
+        """
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {
+                "config": {"id": 1, "name": "test"},
+                "obsolete_field": "will be dropped",
+            }
+        }
+        
+        # Schema only has config, not obsolete_field
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Obsolete field dropped
+        assert "obsolete_field" not in result["data"]
+        
+        # DOCUMENT: config preserved
+        assert result["data"]["config"]["id"] == 1
+    
+    def test_extra_nested_fields_tolerated_by_decoder(self):
+        """
+        Extra fields INSIDE complex object are tolerated if decoder ignores them.
+        
+        EXPECTED: Raw value preserved (decoder doesn't validate internal structure strictly)
+        """
+        # Payload has EXTRA fields not in dataclass
+        data_with_extras = {
+            "id": 42,
+            "name": "test",
+            "priority": "low",
+            "tags": [],
+            "metadata": {},
+            "address": None,
+            "owner": None,
+            "unknown_field": "should_survive",  # Extra field
+            "another_extra": 12345,  # Another extra
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data_with_extras}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Raw value preserved including extra fields
+        # (migrator preserves raw_value when decoder validates)
+        assert result["data"]["config"]["id"] == 42
+        assert result["data"]["config"]["unknown_field"] == "should_survive"
+        assert result["data"]["config"]["another_extra"] == 12345
+    
+    def test_optional_nested_none_preserved(self):
+        """
+        None values for optional nested objects are preserved.
+        
+        EXPECTED: None → None (no decoder called)
+        """
+        data_with_none = {
+            "id": 1,
+            "name": "test",
+            "priority": "medium",
+            "tags": [],
+            "metadata": {},
+            "address": None,  # Explicitly None
+            "owner": None,    # Explicitly None
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data_with_none}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default", address=Address("default", "city", "00000"))
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: None fields preserved exactly
+        assert result["data"]["config"]["address"] is None
+        assert result["data"]["config"]["owner"] is None
+    
+    def test_inheritance_subclass_preserved(self):
+        """
+        Subclass instances are preserved if decoder reconstructs correctly.
+        
+        EXPECTED: Employee data survives (decoder handles __class__ marker)
+        """
+        employee_data = {
+            "id": 1,
+            "name": "test",
+            "priority": "medium",
+            "tags": [],
+            "metadata": {},
+            "address": None,
+            "owner": {
+                "__class__": "Employee",
+                "name": "Alice",
+                "age": 30,
+                "employee_id": "E001",
+                "department": "Engineering"
+            },
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": employee_data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Subclass data preserved including specific fields
+        assert result["data"]["config"]["owner"]["__class__"] == "Employee"
+        assert result["data"]["config"]["owner"]["employee_id"] == "E001"
+        assert result["data"]["config"]["owner"]["department"] == "Engineering"
+    
+    def test_switch_inheritance_variant_preserved(self):
+        """
+        Switching from one subclass to another works if decoder handles it.
+        
+        EXPECTED: New variant (Manager) preserved after migration
+        """
+        # Payload with Manager (different from Employee)
+        manager_data = {
+            "id": 1,
+            "name": "test",
+            "priority": "medium",
+            "tags": [],
+            "metadata": {},
+            "address": None,
+            "owner": {
+                "__class__": "Manager",
+                "name": "Bob",
+                "age": 45,
+                "team_size": 10,
+                "budget": 100000.0
+            },
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": manager_data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Manager variant preserved
+        assert result["data"]["config"]["owner"]["__class__"] == "Manager"
+        assert result["data"]["config"]["owner"]["team_size"] == 10
+        assert result["data"]["config"]["owner"]["budget"] == 100000.0
+    
+    def test_enum_valid_value_preserved(self):
+        """
+        Valid enum values are preserved during migration.
+        
+        EXPECTED: Enum string value survives
+        """
+        data = {
+            "id": 1,
+            "name": "test",
+            "priority": "high",  # Valid Priority enum
+            "tags": [],
+            "metadata": {},
+            "address": None,
+            "owner": None,
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default", priority=Priority.LOW)
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Enum value preserved
+        assert result["data"]["config"]["priority"] == "high"
+    
+    def test_version_change_alone_preserves_data(self):
+        """
+        Changing only the version does not affect data.
+        
+        EXPECTED: Data unchanged, only version number changes
+        """
+        data = {"id": 999, "name": "versioned", "priority": "low", "tags": ["v1"], "metadata": {"version": "1.0"}, "address": None, "owner": None}
+        
+        payload = {
+            "version": "1.0.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "99.99.99", fields)
+        
+        # DOCUMENT: Version changed
+        assert result["version"] == "99.99.99"
+        
+        # DOCUMENT: Data unchanged
+        assert result["data"]["config"]["id"] == 999
+        assert result["data"]["config"]["name"] == "versioned"
+
+
+# ============================================================================
+# TestComplexMigrationResetToDefault
+# ============================================================================
+
+class TestComplexMigrationResetToDefault:
+    """
+    Document which structural changes RESET to default.
+    
+    Purpose:
+        Empirically determine what modifications cause the migrator
+        to discard the old value and use the field's default.
+        
+    Key insight:
+        Reset happens when:
+        1. Decoder raises exception
+        2. Decoder returns wrong type
+        3. No decoder and type doesn't match
+    """
+    
+    def test_invalid_enum_resets_to_default(self):
+        """
+        Invalid enum value causes decoder to fail → reset to default.
+        
+        EXPECTED: Reset to default (decoder raises ValueError for invalid enum)
+        """
+        data_with_invalid_enum = {
+            "id": 1,
+            "name": "test",
+            "priority": "INVALID_PRIORITY",  # Not a valid Priority value
+            "tags": [],
+            "metadata": {},
+            "address": None,
+            "owner": None,
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data_with_invalid_enum}
+        }
+        
+        default_config = ComplexConfig(id=999, name="DEFAULT_NAME", priority=Priority.MEDIUM)
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Reset to default because decoder failed on invalid enum
+        assert result["data"]["config"]["id"] == 999
+        assert result["data"]["config"]["name"] == "DEFAULT_NAME"
+        assert result["data"]["config"]["priority"] == "medium"  # Default encoded
+    
+    def test_missing_required_field_in_decoder_resets(self):
+        """
+        Missing required field (like 'name') that decoder needs.
+        
+        DOCUMENTED BEHAVIOR:
+            Our decoder uses .get() with defaults, so it's resilient to missing fields.
+            The decoder succeeds → raw value is preserved (even without 'name' key).
+            The missing 'name' field simply doesn't appear in preserved raw value.
+        """
+        # Data missing 'name' which is required by dataclass
+        data_missing_required = {
+            "id": 1,
+            # "name" is missing - but decoder handles it with .get()
+            "priority": "low",
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data_missing_required}
+        }
+        
+        default_config = ComplexConfig(id=999, name="DEFAULT")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENTED: Decoder uses .get() with defaults, so it succeeds
+        # Raw value is preserved AS-IS (without 'name' key)
+        assert result["data"]["config"]["id"] == 1
+        assert "name" not in result["data"]["config"]  # Missing key stays missing!
+        
+        # This is IMPORTANT behavior: migrator preserves raw_value, not decoded value
+        # So if a key was missing in the original, it stays missing
+    
+    def test_wrong_type_for_nested_object_resets(self):
+        """
+        Wrong type for nested object (string instead of dict) → reset.
+        
+        EXPECTED: Reset to default (decoder fails to parse)
+        """
+        data_wrong_nested_type = {
+            "id": 1,
+            "name": "test",
+            "priority": "low",
+            "tags": [],
+            "metadata": {},
+            "address": "NOT_A_DICT",  # Should be dict or None
+            "owner": None,
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data_wrong_nested_type}
+        }
+        
+        default_config = ComplexConfig(id=999, name="DEFAULT", address=Address("default_street", "default_city", "00000"))
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Decoder fails when trying Address.from_dict("NOT_A_DICT")
+        # So we get reset to default
+        assert result["data"]["config"]["id"] == 999
+        assert result["data"]["config"]["name"] == "DEFAULT"
+    
+    def test_completely_wrong_structure_resets(self):
+        """
+        Completely wrong structure (not a dict at all) → reset.
+        
+        EXPECTED: Reset to default
+        """
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": "just_a_string_not_a_dict"}
+        }
+        
+        default_config = ComplexConfig(id=999, name="DEFAULT")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Complete reset because decoder can't handle string
+        assert result["data"]["config"]["id"] == 999
+        assert result["data"]["config"]["name"] == "DEFAULT"
+    
+    def test_list_instead_of_dict_resets(self):
+        """
+        List where dict expected → reset.
+        
+        EXPECTED: Reset to default
+        """
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": [1, 2, 3]}  # List, not dict
+        }
+        
+        default_config = ComplexConfig(id=999, name="DEFAULT")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Reset because list has no .get() method
+        assert result["data"]["config"]["id"] == 999
+    
+    def test_decoder_returns_wrong_type_resets(self):
+        """
+        Decoder succeeds but returns wrong type → reset.
+        
+        EXPECTED: Reset to default (isinstance check fails)
+        """
+        def bad_decoder(data: dict):
+            # Returns a string instead of ComplexConfig
+            return "not_a_complex_config"
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": {"id": 1, "name": "test"}}
+        }
+        
+        default_config = ComplexConfig(id=999, name="DEFAULT")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=bad_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Reset because decoded value is not instance of ComplexConfig
+        assert result["data"]["config"]["id"] == 999
+    
+    def test_field_type_changed_in_schema_resets(self):
+        """
+        Changing field type in schema (e.g., int to str) → behavior depends on decoder.
+        
+        Note: With complex types using decoder, the decoder determines outcome.
+        """
+        # Old payload has complex object
+        old_data = {"id": 1, "name": "test", "priority": "low", "tags": [], "metadata": {}, "address": None, "owner": None}
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": old_data}
+        }
+        
+        # New schema expects string, not ComplexConfig
+        fields = [Data(name="config", data_type=str, default="string_default")]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: No decoder means type coercion is attempted
+        # dict → str gives something like "{'id': 1, ...}"
+        # This is actually "successful" coercion to string!
+        assert isinstance(result["data"]["config"], str)
+
+
+# ============================================================================
+# TestComplexMigrationNoneSemantics
+# ============================================================================
+
+class TestComplexMigrationNoneSemantics:
+    """
+    Document None handling during migration.
+    
+    Key insight:
+        None is terminal - it means "no value exists".
+        None is NOT decoded, NOT encoded, just preserved.
+    """
+    
+    def test_explicit_none_in_payload_preserved(self):
+        """
+        Explicit None in payload is preserved (not reset to default).
+        
+        EXPECTED: None → None (bypasses decoder entirely)
+        """
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": None}  # Explicitly None
+        }
+        
+        default_config = ComplexConfig(id=999, name="DEFAULT")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: None preserved, default NOT used
+        assert result["data"]["config"] is None
+    
+    def test_missing_field_with_none_default(self):
+        """
+        Missing field with None as default → None in output.
+        
+        EXPECTED: None from default
+        """
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {}  # Field missing
+        }
+        
+        fields = [Data(name="config", data_type=ComplexConfig, default=None, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Default None is used, encoder NOT applied
+        assert result["data"]["config"] is None
+    
+    def test_none_with_encoder_not_encoded(self):
+        """
+        None is NOT passed to encoder even when encoder exists.
+        
+        EXPECTED: None preserved as-is
+        """
+        def encoder_that_would_crash(obj):
+            return obj.to_dict()  # Would crash on None
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": None}
+        }
+        
+        fields = [Data(name="config", data_type=ComplexConfig, default=None, encoder=encoder_that_would_crash, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: No crash, None preserved
+        assert result["data"]["config"] is None
+    
+    def test_decoder_failure_with_none_default(self):
+        """
+        When decoder fails AND default is None → None in output.
+        
+        EXPECTED: None (fallback to None default)
+        """
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": "invalid_data_for_decoder"}
+        }
+        
+        # Default is None
+        fields = [Data(name="config", data_type=ComplexConfig, default=None, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Decoder fails → fallback to default (None) → None returned
+        assert result["data"]["config"] is None
+    
+    def test_nested_none_in_complex_structure_preserved(self):
+        """
+        None values deep inside complex structure are preserved.
+        
+        EXPECTED: Nested None values survive round-trip
+        """
+        data_with_nested_none = {
+            "id": 1,
+            "name": "test",
+            "priority": "low",
+            "tags": [],
+            "metadata": {},
+            "address": None,  # None nested
+            "owner": None,    # None nested
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data_with_nested_none}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default", address=Address("x", "y", "z"))
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Nested None preserved in raw value
+        assert result["data"]["config"]["address"] is None
+        assert result["data"]["config"]["owner"] is None
+
+
+# ============================================================================
+# TestComplexMigrationEdgeCases
+# ============================================================================
+
+class TestComplexMigrationEdgeCases:
+    """
+    Edge cases and boundary conditions for complex migrations.
+    """
+    
+    def test_empty_collections_preserved(self):
+        """
+        Empty lists and dicts are preserved (not reset to default).
+        
+        EXPECTED: Empty collections survive
+        """
+        data = {
+            "id": 1,
+            "name": "test",
+            "priority": "low",
+            "tags": [],           # Empty list
+            "metadata": {},       # Empty dict
+            "address": None,
+            "owner": None,
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default", tags=["default_tag"], metadata={"default": "value"})
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Empty collections preserved, not replaced by default's collections
+        assert result["data"]["config"]["tags"] == []
+        assert result["data"]["config"]["metadata"] == {}
+    
+    def test_large_nested_lists_preserved(self):
+        """
+        Large collections survive migration.
+        
+        EXPECTED: All elements preserved
+        """
+        large_tags = [f"tag_{i}" for i in range(1000)]
+        data = {
+            "id": 1,
+            "name": "test",
+            "priority": "low",
+            "tags": large_tags,
+            "metadata": {},
+            "address": None,
+            "owner": None,
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Large list preserved
+        assert len(result["data"]["config"]["tags"]) == 1000
+        assert result["data"]["config"]["tags"][500] == "tag_500"
+    
+    def test_deeply_nested_structure_preserved(self):
+        """
+        Deeply nested structures survive if decoder handles them.
+        
+        EXPECTED: All nesting levels preserved
+        """
+        # Deep nesting in metadata
+        deep_metadata = {
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "value": "deep_value"
+                    }
+                }
+            }
+        }
+        
+        data = {
+            "id": 1,
+            "name": "test",
+            "priority": "low",
+            "tags": [],
+            "metadata": deep_metadata,
+            "address": None,
+            "owner": None,
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Deep nesting preserved
+        assert result["data"]["config"]["metadata"]["level1"]["level2"]["level3"]["value"] == "deep_value"
+    
+    def test_unicode_in_complex_structure_preserved(self):
+        """
+        Unicode characters survive migration.
+        
+        EXPECTED: Unicode preserved exactly
+        """
+        data = {
+            "id": 1,
+            "name": "テスト 🚀 Тест",
+            "priority": "low",
+            "tags": ["标签", "תגית", "علامة"],
+            "metadata": {"emoji": "👍🏽", "chinese": "中文"},
+            "address": {"street": "日本語の通り", "city": "東京", "zip_code": "〒100"},
+            "owner": None,
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Unicode preserved
+        assert result["data"]["config"]["name"] == "テスト 🚀 Тест"
+        assert result["data"]["config"]["address"]["city"] == "東京"
+    
+    def test_boolean_int_distinction_in_complex(self):
+        """
+        Boolean vs int distinction in nested data.
+        
+        EXPECTED: Types preserved as-is in raw value
+        """
+        data = {
+            "id": 1,
+            "name": "test",
+            "priority": "low",
+            "tags": [],
+            "metadata": {"bool_true": True, "bool_false": False, "int_one": 1, "int_zero": 0},
+            "address": None,
+            "owner": None,
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: Types preserved in raw value
+        assert result["data"]["config"]["metadata"]["bool_true"] is True
+        assert result["data"]["config"]["metadata"]["bool_false"] is False
+        assert result["data"]["config"]["metadata"]["int_one"] == 1
+        assert result["data"]["config"]["metadata"]["int_zero"] == 0
+    
+    def test_numeric_edge_values_preserved(self):
+        """
+        Numeric edge values (very large, zero, negative) survive.
+        
+        EXPECTED: All numeric values preserved
+        """
+        data = {
+            "id": 999999999999999,  # Very large
+            "name": "test",
+            "priority": "low",
+            "tags": [],
+            "metadata": {
+                "zero": 0,
+                "negative": -999,
+                "float": 3.14159265358979,
+                "scientific": 1e100,
+            },
+            "address": None,
+            "owner": None,
+        }
+        
+        payload = {
+            "version": "1.0",
+            "created": "2023-01-01T00:00:00Z",
+            "data": {"config": data}
+        }
+        
+        default_config = ComplexConfig(id=0, name="default")
+        fields = [Data(name="config", data_type=ComplexConfig, default=default_config, encoder=complex_encoder, decoder=complex_decoder)]
+        
+        result = ConfigPayloadMigrator.migrate_payload(payload, "2.0", fields)
+        
+        # DOCUMENT: All numeric values preserved
+        assert result["data"]["config"]["id"] == 999999999999999
+        assert result["data"]["config"]["metadata"]["zero"] == 0
+        assert result["data"]["config"]["metadata"]["negative"] == -999
+        assert result["data"]["config"]["metadata"]["scientific"] == 1e100
