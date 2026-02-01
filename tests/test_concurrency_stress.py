@@ -642,13 +642,14 @@ def collect_and_report_results(processes: List[multiprocessing.Process], result_
                     p.join(timeout=1)
             raise TimeoutError(f"Process {proc.pid} did not complete within timeout (potential deadlock)")
     
-    # Collect results
+    # Collect results - avoid empty() race condition
+    # Try to collect up to len(processes) results with timeout
     results = []
-    while not result_queue.empty():
+    for _ in range(len(processes)):
         try:
-            results.append(result_queue.get_nowait())
+            results.append(result_queue.get(timeout=0.1))
         except:
-            break
+            break  # No more results available
     
     # Aggregate metrics
     total_elapsed = max((r["elapsed"] for r in results), default=0)
