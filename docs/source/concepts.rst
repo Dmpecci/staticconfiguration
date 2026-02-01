@@ -87,16 +87,36 @@ This ensures that:
 
 Type safety and normalization
 ------------------------------
-All values are validated against their declared type.
 
-During schema migration or recovery:
+staticconfiguration provides strong, deterministic normalization guarantees
+for simple, JSON-native data types such as ``int``, ``float``, ``str``,
+``bool``, ``list`` and ``dict``.
+
+All non-null values are validated against their declared type, either directly
+or via user-provided decoders.
+
+For these types, during schema migration or recovery:
 
 - Missing fields are filled with their default values.
-- Extra fields in the JSON file are discarded.
+- Extra top-level fields in the JSON file are discarded.
 - Type mismatches attempt a cast to the declared type.
 - If casting fails, the default value is used.
 
-This normalization process is deterministic and schema-driven.
+This process is deterministic and fully schema-driven.
+
+For complex domain objects (custom classes, dataclasses, inheritance
+hierarchies), normalization is **explicitly delegated** to user-provided
+encoders and decoders.
+
+In these cases:
+
+- The library does not attempt structural normalization.
+- Decoders define what constitutes a valid value.
+- Values are either preserved entirely or reset to defaults.
+- No partial or heuristic migration is performed.
+
+This design prevents implicit assumptions and avoids fragile, error-prone
+reconstruction logic.
 
 Schema versioning
 -----------------

@@ -89,7 +89,9 @@ to other processes.
 
 Type safety
 
-Values are validated against the declared data_type.
+Non-null values are validated against the declared data_type, either directly
+or via user-provided decoders. ``None`` is treated as an explicit absence of
+value and is always accepted.
 
 .. code-block:: python
 
@@ -132,7 +134,10 @@ decoder functions can be provided.
 
 
 Encoders are applied when writing values to JSON.
-Decoders are applied when reading values from JSON.
+Encoders are applied when writing values to JSON.
+Decoders are applied when reading values from JSON and for validation during
+schema migration.
+
 
 Next steps
 

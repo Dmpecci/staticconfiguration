@@ -1,6 +1,6 @@
 [project]
 name = "staticconfiguration"
-version = "1.0.0"
+version = "1.0.1"
 description = "Strongly typed, persistent global configuration for single-machine Python applications."
 authors = [
     { name = "David Muñoz Pecci", email = "davidmpe2002@gmail.com" }

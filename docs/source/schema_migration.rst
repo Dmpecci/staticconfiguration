@@ -61,37 +61,43 @@ regardless of the number of intermediate versions.
 Field resolution rules
 ----------------------
 
-During migration, each declared field is resolved independently.
+During migration, each declared ``Data`` field is resolved atomically.
 
-The rules are applied in the following order:
+Resolution rules are applied **per field**, not recursively to internal
+structures:
 
 - **Field present in payload**:
-	- If the value matches the declared type, it is preserved.
-	- If the type differs, an explicit cast is attempted.
-	- If casting fails, the default value is used.
+    - If the field defines a decoder and the decoder successfully validates the
+      stored value (returning an instance of ``data_type``), the stored raw value
+      is preserved exactly.
+    - If validation fails, the field is reset to its default value.
 
 - **Field missing in payload**:
-	- The default value defined in the schema is used.
+    - The default value defined in the schema is used.
 
-- **Extra fields in payload**:
-	- Fields not declared in the schema are dropped.
+- **Extra top-level fields in payload**:
+    - Fields not declared in the schema are dropped.
 
-This guarantees that the resulting payload always matches the declared schema
-exactly.
-
----
+The migrator does **not** normalize or reconstruct internal structures.
+Preservation of nested fields depends entirely on decoder tolerance.
 
 Encoders and decoders during migration
 --------------------------------------
 
-If a field defines an encoder or decoder, they are applied as follows:
+During migration, encoders and decoders are used with **distinct roles**:
 
-- Migration applies type coercion and (optionally) encoders to produce a JSON-safe payload. 
-- Decoders are applied at read time (domain projection), not during migration.
+- **Encoders** are used only to serialize default values when a field must be
+  reset.
 
-Correct encoder and decoder behavior is the responsibility of the developer.
+- **Decoders** are used during migration **only for semantic validation**:
+    - If a decoder successfully validates the stored value (returning an instance
+      of ``data_type``), the raw serialized value is preserved.
+    - If the decoder fails or returns an incompatible type, the field is reset
+      to its default.
 
-Encoders/decoders are expected to be total functions. If they raise, the exception propagates (programming error).
+Decoders do not reconstruct or transform values during migration.
+They are not applied to produce migrated payloads, only to decide whether a
+stored value can be preserved safely.
 
 ---
 
@@ -143,6 +149,22 @@ instead of migration.
 
 ---
 
+Atomicity of migration
+----------------------
+
+Migration operates at the level of declared ``Data`` fields.
+
+Each field is treated as an atomic unit:
+
+- Internal structures are not migrated or patched incrementally.
+- If a field value cannot be validated safely, it is reset entirely to its
+  default value.
+- Partial preservation of invalid structures is never attempted.
+
+This design avoids heuristic recovery and ensures deterministic outcomes.
+
+---
+
 Summary
 -------
 
@@ -150,8 +172,9 @@ Schema migration in ``staticconfiguration`` follows these principles:
 
 - Explicit, schema-driven evolution.
 - Deterministic reconstruction over incremental patches.
-- Strong normalization guarantees.
-- Minimal developer intervention.
+- Deterministic, conservative migration semantics.
+- Explicit schema-driven field resolution.
+- Validation-based preservation of existing data.
 - Safe defaults over partial preservation.
 
 This approach favors long-term maintainability and predictable behavior.

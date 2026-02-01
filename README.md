@@ -16,10 +16,10 @@ this library is for you.
 ## What this library is
 
 - Persistent global configuration stored in local JSON.
-- Strongly typed, schema-driven configuration.
+- Strongly typed, schema-driven configuration (with explicit encoder/decoder support for complex types).
 - Static access (no instances, no containers).
 - Safe multiprocess access via file locking.
-- Automatic schema migration.
+- Automatic, deterministic schema migration with safe defaults.
 - Designed for single-machine applications.
 
 Typical use cases include application preferences, UI state, feature flags, timeouts, and similar cross-cutting configuration data.
@@ -146,7 +146,7 @@ Key sections:
 
 ## Project status
 
-- **Stable release**: v1.0.0
+- **Stable release**: v1.0.1
 - Designed for single-machine environments.
 - Local filesystem required.
 - **License**: MPL-2.0
